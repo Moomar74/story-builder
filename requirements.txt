@@ -1,0 +1,6 @@
+opencv-python
+mediapipe
+dollarpy
+bleak
+dlib
+numpy

@@ -10,6 +10,8 @@ discovered_devices = []
 # Map of BT_Address -> MarkerID to watch for
 # This will be populated from users.txt and updated manually via client messages
 watched_devices = {}
+# Track which devices are currently "Present" to handle Auto-Logout
+active_sessions = {}  # Map of Address -> MarkerID
 
 def load_users_to_watch():
     """Tries to find users.txt and pre-populate the watch list."""
@@ -32,8 +34,8 @@ def load_users_to_watch():
                         if len(parts) >= 3:
                             # format: mkr_id|name|bt_addr
                             mkr_id = parts[0]
-                            bt_addr = parts[2]
-                            if bt_addr and bt_addr != "N/A" and bt_addr != "None":
+                            bt_addr = parts[2].strip().upper()
+                            if bt_addr and bt_addr != "N/A" and bt_addr != "NONE":
                                 watched_devices[bt_addr] = mkr_id
                 found = True
                 break
@@ -66,14 +68,32 @@ async def scanBT():
             
             msg = "BT_LIST:" + ",".join(dev_strings)
             broadcast(msg)
-            print(f"[*] Scan complete. Found {len(devices)} devices. Notified {len(connected_clients)} client(s).")
+            print(f"\n[*] Scan complete. Found {len(devices)} device(s):")
+            for d in devices:
+                print(f"    - {d.name} [{d.address}]")
+            print(f"[*] Notified {len(connected_clients)} client(s).")
             
-            # 2. Check for watched devices (Auto-Login)
-            current_addresses = {d.address for d in devices}
+            # 2. Check for watched devices (Auto-Login & Attendance)
+            current_addresses = {d.address.upper() for d in devices}
+            
+            # --- Handle Login & Attendance ---
             for addr, marker_id in list(watched_devices.items()):
-                if addr in current_addresses:
-                    print(f"[!] Watched device {addr} found! Triggering auto-login for Marker {marker_id}")
-                    broadcast(f"AUTOLOGIN:{marker_id}")
+                addr_up = addr.upper()
+                if addr_up in current_addresses:
+                    if addr_up not in active_sessions:
+                        # First time seeing this device this session
+                        print(f"[!] Attendance Recorded: Device {addr} (User {marker_id})")
+                        broadcast(f"ATTENDANCE_LOGGED:{marker_id}")
+                        broadcast(f"AUTOLOGIN:{marker_id}")
+                        active_sessions[addr_up] = marker_id
+            
+            # --- Handle Auto-Logout (Scenario: Student leaves room) ---
+            for addr_up in list(active_sessions.keys()):
+                if addr_up not in current_addresses:
+                    marker_id = active_sessions[addr_up]
+                    print(f"[-] Device {addr_up} left range. Triggering Auto-Logout for User {marker_id}")
+                    broadcast(f"AUTOLOGOUT:{marker_id}")
+                    del active_sessions[addr_up]
                     
         except Exception as e:
             print(f"\n[!] Scan error: {e}")
@@ -89,7 +109,7 @@ def broadcast(message):
     for conn in list(connected_clients):
         try:
             conn.sendall(msg_bytes)
-        except:
+        except Exception:
             if conn in connected_clients:
                 connected_clients.remove(conn)
 
@@ -122,7 +142,7 @@ def handle_client(conn, addr):
                 if bt_addr in current_addresses:
                     print(f"[!] Watched device {bt_addr} already detected. Sending instant login for Marker {mkr_id} to new client.")
                     conn.sendall(f"AUTOLOGIN:{mkr_id}\n".encode('utf-8'))
-        except:
+        except Exception:
             pass
 
     try:
@@ -171,7 +191,7 @@ def start_tcp_server():
             t = threading.Thread(target=handle_client, args=(conn, addr))
             t.daemon = True
             t.start()
-        except:
+        except Exception:
             break
 
 async def main():
