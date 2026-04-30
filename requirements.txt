@@ -5,3 +5,4 @@ bleak
 dlib
 numpy
 ultralytics
+face-recognition
