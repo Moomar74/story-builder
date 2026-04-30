@@ -42,6 +42,7 @@ from collections import deque
 import cv2
 import numpy as np
 from dollarpy import Recognizer, Template, Point
+from ultralytics import YOLO
 
 # MediaPipe for skeleton tracking
 import mediapipe as mp
@@ -576,73 +577,155 @@ class SkeletonTracker:
 
 
 class ObjectTracker:
-    """Tracks physical objects using OpenCV trackers."""
+    """Tracks physical objects using YOLO detection."""
     
-    def __init__(self):
+    def __init__(self, model_path: str = "yolov8n.pt"):
         self.tracked_objects: Dict[int, TrackedObject] = {}
         self.next_id = 0
-        self.detection_interval = 30  # Run detection every N frames
+        self.detection_interval = 5  # Run YOLO detection every N frames
         self.frame_count = 0
+        self.yolo_model = None
+        self.model_path = model_path
+        self._init_yolo()
+        
+        # Toy object class IDs from COCO dataset
+        # 24: backpack, 25: umbrella, 26: handbag, 27: tie, 32: sports ball
+        # 33: kite, 34: baseball bat, 35: baseball glove, 36: skateboard
+        # 37: surfboard, 38: tennis racket, 39: bottle, 40: wine glass
+        # 41: cup, 42: fork, 43: knife, 44: spoon, 45: bowl
+        self.toy_class_ids = [24, 25, 26, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45]
+        self.conf_threshold = 0.4
+        
+    def _init_yolo(self):
+        """Initialize YOLO model."""
+        try:
+            self.yolo_model = YOLO(self.model_path)
+            print(f"[+] YOLO model loaded: {self.model_path}")
+        except Exception as e:
+            print(f"[!] Failed to load YOLO model: {e}")
+            print("[*] Downloading YOLOv8n model...")
+            self.yolo_model = YOLO("yolov8n.pt")  # Auto-download
     
     def detect_and_track(self, frame: np.ndarray) -> List[TrackedObject]:
-        """Detect objects and update trackers."""
+        """Detect objects using YOLO and update trackers."""
         self.frame_count += 1
         h, w = frame.shape[:2]
-        
-        # Simple blob detection for demonstration
-        # In production, integrate with YOLO
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
-        
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         current_objects = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < 500 or area > 50000:
-                continue
+        
+        if self.yolo_model is None:
+            print("[!] YOLO model not available")
+            return current_objects
+        
+        # Run YOLO detection every N frames
+        if self.frame_count % self.detection_interval == 0:
+            results = self.yolo_model(frame, verbose=False)
             
-            x, y, bw, bh = cv2.boundingRect(cnt)
-            cx = (x + bw / 2) / w
-            cy = (y + bh / 2) / h
-            
-            # Check if matches existing tracked object
-            matched = False
+            for result in results:
+                if result.boxes is None:
+                    continue
+                    
+                for box in result.boxes:
+                    conf = float(box.conf[0])
+                    if conf < self.conf_threshold:
+                        continue
+                    
+                    cls_id = int(box.cls[0])
+                    cls_name = result.names[cls_id]
+                    
+                    # Get bounding box
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    x, y = int(x1), int(y1)
+                    bw, bh = int(x2 - x1), int(y2 - y1)
+                    
+                    # Calculate center
+                    cx = (x + bw / 2) / w
+                    cy = (y + bh / 2) / h
+                    
+                    # Check if matches existing tracked object
+                    matched = False
+                    for obj_id, obj in list(self.tracked_objects.items()):
+                        ox, oy = obj.center
+                        distance = math.hypot(cx - ox, cy - oy)
+                        iou = self._calculate_iou((x, y, bw, bh), obj.bbox)
+                        
+                        if distance < 0.15 or iou > 0.3:  # Match by position or overlap
+                            obj.center = (cx, cy)
+                            obj.bbox = (x, y, bw, bh)
+                            obj.last_seen = time.time()
+                            obj.confidence = conf
+                            obj.trajectory.add_point(cx, cy)
+                            current_objects.append(obj)
+                            matched = True
+                            break
+                    
+                    if not matched and len(self.tracked_objects) < 8:
+                        # Create new tracked object
+                        new_obj = TrackedObject(
+                            id=self.next_id,
+                            bbox=(x, y, bw, bh),
+                            center=(cx, cy),
+                            confidence=conf,
+                            class_name=cls_name
+                        )
+                        new_obj.trajectory = Trajectory(TrajectoryType.OBJECT)
+                        new_obj.trajectory.add_point(cx, cy)
+                        self.tracked_objects[self.next_id] = new_obj
+                        current_objects.append(new_obj)
+                        print(f"[+] New object detected: {cls_name} (ID: {self.next_id}, conf: {conf:.2f})")
+                        self.next_id += 1
+        else:
+            # Update existing objects with motion prediction
             for obj_id, obj in list(self.tracked_objects.items()):
-                ox, oy = obj.center
-                distance = math.hypot(cx - ox, cy - oy)
-                if distance < 0.1:  # Threshold for matching
-                    obj.center = (cx, cy)
-                    obj.bbox = (x, y, bw, bh)
+                if len(obj.trajectory.points) >= 2:
+                    # Simple motion prediction
+                    last_pts = obj.trajectory.points[-2:]
+                    dx = last_pts[1].x - last_pts[0].x
+                    dy = last_pts[1].y - last_pts[0].y
+                    
+                    predicted_cx = obj.center[0] + dx * 0.5
+                    predicted_cy = obj.center[1] + dy * 0.5
+                    
+                    obj.center = (predicted_cx, predicted_cy)
                     obj.last_seen = time.time()
-                    obj.trajectory.add_point(cx, cy)
+                
+                if time.time() - obj.last_seen < 1.0:  # Keep for 1 second without detection
                     current_objects.append(obj)
-                    matched = True
-                    break
-            
-            if not matched and len(self.tracked_objects) < 5:
-                # Create new tracked object
-                new_obj = TrackedObject(
-                    id=self.next_id,
-                    bbox=(x, y, bw, bh),
-                    center=(cx, cy),
-                    confidence=0.8,
-                    class_name="object"
-                )
-                new_obj.trajectory = Trajectory(TrajectoryType.OBJECT)
-                new_obj.trajectory.add_point(cx, cy)
-                self.tracked_objects[self.next_id] = new_obj
-                current_objects.append(new_obj)
-                self.next_id += 1
         
         # Remove stale objects
         now = time.time()
-        stale_ids = [oid for oid, obj in self.tracked_objects.items() if now - obj.last_seen > 2.0]
+        stale_ids = [oid for oid, obj in self.tracked_objects.items() if now - obj.last_seen > 1.5]
         for oid in stale_ids:
-            del self.tracked_objects[oid]
+            if oid in self.tracked_objects:
+                obj = self.tracked_objects[oid]
+                print(f"[-] Object lost: {obj.class_name} (ID: {oid})")
+                del self.tracked_objects[oid]
         
         return current_objects
+    
+    def _calculate_iou(self, box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+        """Calculate Intersection over Union for two bounding boxes."""
+        x1, y1, w1, h1 = box1
+        x2, y2, w2, h2 = box2
+        
+        # Convert to (x1, y1, x2, y2) format
+        box1_x2, box1_y2 = x1 + w1, y1 + h1
+        box2_x2, box2_y2 = x2 + w2, y2 + h2
+        
+        # Calculate intersection
+        xi1 = max(x1, x2)
+        yi1 = max(y1, y2)
+        xi2 = min(box1_x2, box2_x2)
+        yi2 = min(box1_y2, box2_y2)
+        
+        if xi2 <= xi1 or yi2 <= yi1:
+            return 0.0
+        
+        inter_area = (xi2 - xi1) * (yi2 - yi1)
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        union_area = box1_area + box2_area - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0.0
 
 
 class LaserTracker:
@@ -871,10 +954,19 @@ class TrajectoryClassifier:
                 x, y = obj.center
                 bx, by, bw, bh = obj.bbox
                 
-                # Draw bounding box
-                cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (255, 165, 0), 2)
-                cv2.putText(frame, f"Obj {obj.id}", (bx, by - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
+                # Draw bounding box with class name from YOLO
+                color = (0, 255, 255)  # Cyan for objects (more visible)
+                cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), color, 2)
+                
+                # Enhanced label with background for readability
+                label = f"{obj.class_name} #{obj.id} ({obj.confidence:.2f})"
+                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                
+                # Draw background rectangle for text
+                cv2.rectangle(frame, (bx, by - text_h - 10), (bx + text_w, by), color, -1)
+                # Draw text in black on colored background
+                cv2.putText(frame, label, (bx, by - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
                 
                 # Draw trajectory
                 pts = obj.trajectory.points

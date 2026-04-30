@@ -4,3 +4,4 @@ dollarpy
 bleak
 dlib
 numpy
+ultralytics
