@@ -27,11 +27,11 @@ namespace TUIO
 
         public class User
         {
-            public int Id { get; set; }
+            public string Id { get; set; }
+            public int TuioId { get; set; }        // Incremental marker ID for manual login
             public string Name { get; set; }
             public string Role { get; set; }  // "Student", "Teacher", "Guest"
             public string BluetoothAddress { get; set; }
-            public string MarkerId { get; set; }  // Optional marker assignment
             public DateTime CreatedAt { get; set; }
             public DateTime LastLogin { get; set; }
             public bool IsActive { get; set; } = true;
@@ -41,7 +41,7 @@ namespace TUIO
         public class AttendanceRecord
         {
             public int Id { get; set; }
-            public int UserId { get; set; }
+            public string UserId { get; set; }
             public string UserName { get; set; }
             public DateTime LoginTime { get; set; }
             public DateTime? LogoutTime { get; set; }
@@ -53,7 +53,7 @@ namespace TUIO
         public class GazeDataRecord
         {
             public int Id { get; set; }
-            public int UserId { get; set; }
+            public string UserId { get; set; }
             public string Page { get; set; }
             public float GazeX { get; set; }
             public float GazeY { get; set; }
@@ -63,7 +63,6 @@ namespace TUIO
 
         private class DatabaseData
         {
-            public int LastUserId { get; set; } = 0;
             public int LastAttendanceId { get; set; } = 0;
             public int LastGazeId { get; set; } = 0;
             public List<User> Users { get; set; } = new List<User>();
@@ -131,9 +130,21 @@ namespace TUIO
             return data.Users.Where(u => u.IsActive && u.Role == "Teacher").ToList();
         }
 
-        public User GetUserById(int id)
+        public User GetUserById(string id)
         {
-            return data.Users.FirstOrDefault(u => u.Id == id && u.IsActive);
+            if (string.IsNullOrEmpty(id)) return null;
+            
+            // 1. Try UUID match
+            var user = data.Users.FirstOrDefault(u => u.Id == id && u.IsActive);
+            if (user != null) return user;
+
+            // 2. Try numeric TUIO ID match (for manual login)
+            int tid;
+            if (int.TryParse(id, out tid))
+            {
+                return data.Users.FirstOrDefault(u => u.TuioId == tid && u.IsActive);
+            }
+            return null;
         }
 
         public User GetUserByName(string name)
@@ -150,21 +161,23 @@ namespace TUIO
                 u.IsActive);
         }
 
-        public int GetNextUserId()
-        {
-            data.LastUserId++;
-            return data.LastUserId;
-        }
-
         public User CreateUser(string name, string role = "Student", string btAddress = null)
         {
             // Check for duplicate name
             if (GetUserByName(name) != null)
                 throw new Exception("A user with this name already exists.");
 
+            // Find next available TUIO ID (start from 11, skip 36)
+            int nextTuioId = 11;
+            if (data.Users.Any())
+            {
+                nextTuioId = Math.Max(11, data.Users.Max(u => u.TuioId) + 1);
+            }
+
             var user = new User
             {
-                Id = GetNextUserId(),
+                Id = Guid.NewGuid().ToString(),
+                TuioId = nextTuioId,
                 Name = name,
                 Role = role,
                 BluetoothAddress = btAddress,
@@ -186,14 +199,14 @@ namespace TUIO
                 existing.Name = user.Name;
                 existing.Role = user.Role;
                 existing.BluetoothAddress = user.BluetoothAddress;
-                existing.MarkerId = user.MarkerId;
+                existing.TuioId = user.TuioId;
                 existing.IsActive = user.IsActive;
                 existing.Metadata = user.Metadata;
                 Save();
             }
         }
 
-        public void DeleteUser(int id)
+        public void DeleteUser(string id)
         {
             var user = data.Users.FirstOrDefault(u => u.Id == id);
             if (user != null)
@@ -203,7 +216,7 @@ namespace TUIO
             }
         }
 
-        public void RecordLogin(int userId)
+        public void RecordLogin(string userId)
         {
             var user = GetUserById(userId);
             if (user != null)
@@ -213,7 +226,7 @@ namespace TUIO
             }
         }
 
-        public bool IsTeacher(int userId)
+        public bool IsTeacher(string userId)
         {
             var user = GetUserById(userId);
             return user != null && user.Role == "Teacher";
@@ -223,7 +236,7 @@ namespace TUIO
 
         #region Attendance Operations
 
-        public int StartAttendanceSession(int userId, string sessionType = "Manual")
+        public int StartAttendanceSession(string userId, string sessionType = "Manual")
         {
             var user = GetUserById(userId);
             if (user == null) return -1;
@@ -257,12 +270,12 @@ namespace TUIO
             }
         }
 
-        public List<AttendanceRecord> GetAttendanceHistory(int? userId = null, DateTime? fromDate = null, DateTime? toDate = null)
+        public List<AttendanceRecord> GetAttendanceHistory(string userId = null, DateTime? fromDate = null, DateTime? toDate = null)
         {
             var query = data.Attendance.AsEnumerable();
 
-            if (userId.HasValue)
-                query = query.Where(a => a.UserId == userId.Value);
+            if (!string.IsNullOrEmpty(userId))
+                query = query.Where(a => a.UserId == userId);
 
             if (fromDate.HasValue)
                 query = query.Where(a => a.LoginTime >= fromDate.Value);
@@ -277,7 +290,7 @@ namespace TUIO
 
         #region Gaze Data Operations
 
-        public void RecordGazeData(int userId, string page, float gazeX, float gazeY, bool isBlink = false)
+        public void RecordGazeData(string userId, string page, float gazeX, float gazeY, bool isBlink = false)
         {
             data.LastGazeId++;
             var record = new GazeDataRecord
@@ -298,12 +311,12 @@ namespace TUIO
                 Save();
         }
 
-        public List<GazeDataRecord> GetGazeData(int? userId = null, string page = null, DateTime? fromDate = null)
+        public List<GazeDataRecord> GetGazeData(string userId = null, string page = null, DateTime? fromDate = null)
         {
             var query = data.GazeData.AsEnumerable();
 
-            if (userId.HasValue)
-                query = query.Where(g => g.UserId == userId.Value);
+            if (!string.IsNullOrEmpty(userId))
+                query = query.Where(g => g.UserId == userId);
 
             if (!string.IsNullOrEmpty(page))
                 query = query.Where(g => g.Page == page);
@@ -314,12 +327,12 @@ namespace TUIO
             return query.OrderByDescending(g => g.Timestamp).ToList();
         }
 
-        public void ClearGazeData(int? userId = null, string page = null)
+        public void ClearGazeData(string userId = null, string page = null)
         {
             var query = data.GazeData.AsEnumerable();
 
-            if (userId.HasValue)
-                query = query.Where(g => g.UserId == userId.Value);
+            if (!string.IsNullOrEmpty(userId))
+                query = query.Where(g => g.UserId == userId);
 
             if (!string.IsNullOrEmpty(page))
                 query = query.Where(g => g.Page == page);
@@ -358,7 +371,7 @@ namespace TUIO
                             {
                                 var user = new User
                                 {
-                                    Id = id,
+                                    Id = id.ToString(),
                                     Name = name,
                                     Role = id == 36 ? "Teacher" : "Student",
                                     BluetoothAddress = btAddr,
@@ -367,7 +380,7 @@ namespace TUIO
                                     IsActive = true
                                 };
                                 data.Users.Add(user);
-                                if (id > data.LastUserId) data.LastUserId = id;
+                                // data.LastUserId handled by Guid in CreateUser
                             }
                         }
                     }

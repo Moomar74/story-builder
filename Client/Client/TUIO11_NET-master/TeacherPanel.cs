@@ -25,7 +25,7 @@ namespace TUIO
         private Button btnUpdate;
         private Button btnDelete;
         private Button btnClear;
-        private int selectedUserId = -1;
+        private string selectedUserId = "-1";
 
         // Attendance Tab
         private DataGridView attendanceGrid;
@@ -226,7 +226,7 @@ namespace TUIO
             if (e.RowIndex >= 0)
             {
                 var row = studentsGrid.Rows[e.RowIndex];
-                selectedUserId = (int)row.Cells["Id"].Value;
+                selectedUserId = row.Cells["Id"].Value.ToString();
                 txtName.Text = row.Cells["Name"].Value.ToString();
                 cmbRole.SelectedItem = row.Cells["Role"].Value.ToString();
                 txtBluetooth.Text = row.Cells["Bluetooth"].Value?.ToString() ?? "";
@@ -266,7 +266,7 @@ namespace TUIO
 
         private void BtnUpdate_Click(object sender, EventArgs e)
         {
-            if (selectedUserId < 0) return;
+            if (selectedUserId == "-1") return;
 
             var user = db.GetUserById(selectedUserId);
             if (user != null)
@@ -285,7 +285,7 @@ namespace TUIO
 
         private void BtnDelete_Click(object sender, EventArgs e)
         {
-            if (selectedUserId < 0) return;
+            if (selectedUserId == "-1") return;
 
             var result = MessageBox.Show(
                 "Are you sure you want to delete this user?\nThis action cannot be undone.",
@@ -311,7 +311,7 @@ namespace TUIO
 
         private void ClearForm()
         {
-            selectedUserId = -1;
+            selectedUserId = "-1";
             txtName.Text = "";
             txtBluetooth.Text = "";
             cmbRole.SelectedIndex = 0;
@@ -470,14 +470,14 @@ namespace TUIO
 
         private void BtnFilterAttendance_Click(object sender, EventArgs e)
         {
-            int? userId = null;
+            string userId = null;
             if (cmbFilterUser.SelectedIndex > 0)
             {
                 string selected = cmbFilterUser.SelectedItem.ToString();
                 int idStart = selected.IndexOf("ID: ") + 4;
                 int idEnd = selected.IndexOf(")", idStart);
-                if (int.TryParse(selected.Substring(idStart, idEnd - idStart), out int uid))
-                    userId = uid;
+                if (idStart > 3 && idEnd > idStart)
+                    userId = selected.Substring(idStart, idEnd - idStart);
             }
 
             var records = db.GetAttendanceHistory(userId, dtpFrom.Value, dtpTo.Value.AddDays(1));

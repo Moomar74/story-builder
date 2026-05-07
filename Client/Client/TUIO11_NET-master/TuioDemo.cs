@@ -131,7 +131,7 @@ public class TuioDemo : Form, TuioListener
 
     // Logged-in session info
     private string loggedInUser = null;   // null = Guest, otherwise the user's name from database
-    private int loggedInUserId = -1;      // Database ID of logged-in user
+    private string loggedInUserId = "-1"; // Database ID (UUID) of logged-in user
 
     // Database Manager (replaces users.txt)
     private DatabaseManager db;
@@ -167,7 +167,7 @@ public class TuioDemo : Form, TuioListener
     private SignUpPhase suPhase = SignUpPhase.Idle;
 
     private string suName      = "";          // name being typed
-    private int    suAssignedId = -1;         // auto-incremented ID assigned on success
+    private string suAssignedId = "-1";       // auto-incremented ID assigned on success (UUID)
     private string suStatus    = "";          // status / feedback message
 
     // Confirm-hold tracking
@@ -284,6 +284,17 @@ public class TuioDemo : Form, TuioListener
     private int heatmapGridSize = 20;  // Size of each heatmap cell in pixels
     private Bitmap[] heatmapCache = new Bitmap[5];  // Cached heatmap images for each page
     private string[] heatmapPageNames = { "SignIn", "SignUp", "StorySelection", "StoryPlayer", "StoryBuilder" };
+
+    // -- Adaptive Menu System (Gaze-Based) ---------------------
+    private float adaptiveMenuTargetX = 0.5f;   // Target position from server (normalized)
+    private float adaptiveMenuTargetY = 0.5f;
+    private float adaptiveMenuCurrentX = 0.5f;  // Current animated position
+    private float adaptiveMenuCurrentY = 0.5f;
+    private string adaptiveMenuQuadrant = "center";
+    private float adaptiveMenuConfidence = 0.0f;
+    private bool adaptiveMenuEnabled = true;
+    private DateTime adaptiveMenuLastUpdate = DateTime.MinValue;
+    private const float MENU_LERP_SPEED = 0.08f;  // Smooth animation speed
 
     // =========================================================
     //  Constructor
@@ -404,6 +415,56 @@ public class TuioDemo : Form, TuioListener
         gazeThread = new Thread(new ThreadStart(StartGazeClient));
         gazeThread.IsBackground = true;
         gazeThread.Start();
+
+        // Start FaceID tracking listener thread (Port 5003)
+        Thread faceThread = new Thread(new ThreadStart(StartFaceIdClient));
+        faceThread.IsBackground = true;
+        faceThread.Start();
+    }
+
+    private void StartFaceIdClient()
+    {
+        while (isSocketActive)
+        {
+            try
+            {
+                TcpClient faceSocket = new TcpClient("localhost", 5003);
+                NetworkStream stream = faceSocket.GetStream();
+                byte[] buffer = new byte[8192];
+                while (isSocketActive)
+                {
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    if (bytesRead == 0) break;
+                    string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string msg in messages)
+                    {
+                        this.Invoke((MethodInvoker)delegate { 
+                            if (msg.StartsWith("FACE_DETECTED:")) {
+                                string[] p = msg.Split(':');
+                                if (p.Length >= 3) {
+                                    string userId = p[1];
+                                    string userName = p[2];
+                                    // AUTOMATIC LOGIN
+                                    if (state == AppState.SignIn && !signInOk) {
+                                        loggedInUser = userName;
+                                        loggedInUserId = userId; // Keep as UUID string
+                                        signInOk = true;
+                                        state = AppState.StorySelection; // Direct to selection!
+                                        signInMessage = "Welcome back, " + userName + "!";
+                                        
+                                        // Record login in local DB too
+                                        db.RecordLogin(userId);
+                                        Invalidate();
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            catch { Thread.Sleep(2000); }
+        }
     }
 
     private void StartSocketClient()
@@ -474,7 +535,7 @@ public class TuioDemo : Form, TuioListener
             int mkr;
             if (int.TryParse(msg.Substring(18).Trim(), out mkr))
             {
-                var user = db.GetUserById(mkr);
+                var user = db.GetUserById(mkr.ToString());
                 string uName = user?.Name ?? "User #" + mkr;
                 signInMessage = "✓ Attendance logged for " + uName + "!";
                 Invalidate();
@@ -501,7 +562,7 @@ public class TuioDemo : Form, TuioListener
             state = AppState.SignIn;
             signInOk = false;
             loggedInUser = null;
-            loggedInUserId = -1;
+            loggedInUserId = "-1";
             isTeacherMode = false;
             signInMessage = "Student out of range. Session closed automatically.";
             Invalidate();
@@ -764,6 +825,26 @@ public class TuioDemo : Form, TuioListener
             string status = msg.Substring(12);
             gazeTracking = (status == "tracking");
         }
+        else if (msg.StartsWith("MENU_POS:"))
+        {
+            // Parse MENU_POS:x,y,quadrant,confidence
+            string payload = msg.Substring(9);
+            string[] parts = payload.Split(',');
+            if (parts.Length >= 4)
+            {
+                float mx, my, conf;
+                if (float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out mx) &&
+                    float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out my) &&
+                    float.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out conf))
+                {
+                    adaptiveMenuTargetX = mx;
+                    adaptiveMenuTargetY = my;
+                    adaptiveMenuQuadrant = parts[2];
+                    adaptiveMenuConfidence = conf;
+                    adaptiveMenuLastUpdate = DateTime.Now;
+                }
+            }
+        }
     }
 
     private void SendGazePageState()
@@ -772,8 +853,10 @@ public class TuioDemo : Form, TuioListener
         {
             try
             {
-                string pageMsg = "PAGE:" + state.ToString() + "\n";
-                byte[] data = Encoding.UTF8.GetBytes(pageMsg);
+                // Send page change + request adaptive menu position
+                string combined = "PAGE:" + state.ToString() + "\n" +
+                                  "GET_MENU_POS:" + state.ToString() + "\n";
+                byte[] data = Encoding.UTF8.GetBytes(combined);
                 gazeSocket.GetStream().Write(data, 0, data.Length);
             }
             catch { }
@@ -931,6 +1014,226 @@ public class TuioDemo : Form, TuioListener
         Invalidate();
     }
 
+    // =========================================================
+    //  Adaptive Menu System (Gaze-Driven)
+    // =========================================================
+    private string[] GetAdaptiveMenuItems()
+    {
+        switch (state)
+        {
+            case AppState.StorySelection:
+                return new string[] { "\u2728 Story 1", "\u2728 Story 2", "\u2728 Story 3", "\u2728 Story 4" };
+            case AppState.StoryPlayer:
+                return new string[] { "\u25B6 Next Scene", "\u25C0 Prev Scene", "\u21BB Restart", "\u2302 Back" };
+            case AppState.StoryBuilder:
+                return new string[] { "\u270F Add Text", "\U0001F3A8 Background", "\U0001F464 Character", "\u2302 Back" };
+            default:
+                return new string[0];  // No adaptive menu for SignIn/SignUp
+        }
+    }
+
+    private void HandleAdaptiveMenuAction(int index)
+    {
+        switch (state)
+        {
+            case AppState.StorySelection:
+                if (index >= 0 && index < 4)
+                {
+                    spStoryIndex = index;
+                    spSceneIndex = 0;
+                    ResetSceneAnimation();
+                    state = AppState.StoryPlayer;
+                }
+                break;
+            case AppState.StoryPlayer:
+                if (index == 0) // Next
+                {
+                    if (spStoryIndex >= 0 && spSceneIndex < StoryDatabase.AllStories[spStoryIndex].Scenes.Length - 1)
+                    { spSceneIndex++; ResetSceneAnimation(); }
+                }
+                else if (index == 1) // Prev
+                {
+                    if (spSceneIndex > 0) { spSceneIndex--; ResetSceneAnimation(); }
+                }
+                else if (index == 2) // Restart
+                {
+                    spSceneIndex = 0; ResetSceneAnimation();
+                }
+                else if (index == 3) // Back
+                {
+                    state = AppState.StorySelection;
+                }
+                break;
+            case AppState.StoryBuilder:
+                if (index == 3) state = AppState.StorySelection;
+                break;
+        }
+        Invalidate();
+    }
+
+    private void DrawAdaptiveMenu(Graphics g)
+    {
+        string[] items = GetAdaptiveMenuItems();
+        if (items.Length == 0 || !adaptiveMenuEnabled) return;
+
+        // Smooth animation: lerp current position toward target
+        adaptiveMenuCurrentX += (adaptiveMenuTargetX - adaptiveMenuCurrentX) * MENU_LERP_SPEED;
+        adaptiveMenuCurrentY += (adaptiveMenuTargetY - adaptiveMenuCurrentY) * MENU_LERP_SPEED;
+
+        float anchorX = adaptiveMenuCurrentX;
+        float anchorY = adaptiveMenuCurrentY;
+
+        // Menu dimensions
+        int menuW = 220;
+        int itemH = 44;
+        int headerH = 36;
+        int padding = 12;
+        int menuH = headerH + items.Length * itemH + padding * 2;
+
+        // Convert normalized anchor to pixel coordinates
+        int mx = (int)(anchorX * width) - menuW / 2;
+        int my = (int)(anchorY * height) - menuH / 2;
+
+        // Clamp to screen bounds
+        mx = Math.Max(10, Math.Min(width - menuW - 10, mx));
+        my = Math.Max(10, Math.Min(height - menuH - 10, my));
+
+        // --- Glass Panel Background ---
+        using (GraphicsPath panelPath = new GraphicsPath())
+        {
+            int radius = 16;
+            panelPath.AddArc(mx, my, radius, radius, 180, 90);
+            panelPath.AddArc(mx + menuW - radius, my, radius, radius, 270, 90);
+            panelPath.AddArc(mx + menuW - radius, my + menuH - radius, radius, radius, 0, 90);
+            panelPath.AddArc(mx, my + menuH - radius, radius, radius, 90, 90);
+            panelPath.CloseFigure();
+
+            // Glassmorphism: semi-transparent background with blur feel
+            int bgAlpha = adaptiveMenuConfidence > 0.3f ? 190 : 130;
+            using (SolidBrush glassBrush = new SolidBrush(Color.FromArgb(bgAlpha, 15, 10, 40)))
+                g.FillPath(glassBrush, panelPath);
+
+            // Glow border based on confidence
+            Color borderColor = adaptiveMenuConfidence > 0.5f
+                ? Color.FromArgb(200, 100, 200, 255)  // Confident: bright blue glow
+                : Color.FromArgb(120, 180, 180, 200); // Learning: subtle gray
+            using (Pen borderPen = new Pen(borderColor, 2f))
+                g.DrawPath(borderPen, panelPath);
+        }
+
+        // --- Header ---
+        string headerText = adaptiveMenuConfidence > 0.3f
+            ? "\U0001F441 Adaptive Menu"
+            : "\U0001F441 Learning Your Gaze...";
+
+        using (Font headerFont = new Font("Segoe UI", 11f, FontStyle.Bold))
+        {
+            Color headerColor = adaptiveMenuConfidence > 0.3f ? Color.FromArgb(255, 180, 220, 255) : Color.FromArgb(180, 200, 200, 200);
+            using (SolidBrush hBrush = new SolidBrush(headerColor))
+                g.DrawString(headerText, headerFont, hBrush, mx + padding, my + 8);
+        }
+
+        // Confidence bar under header
+        int barX = mx + padding;
+        int barY = my + headerH - 6;
+        int barW = menuW - padding * 2;
+        int barH = 3;
+        using (SolidBrush barBg = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
+            g.FillRectangle(barBg, barX, barY, barW, barH);
+        int fillW = (int)(barW * Math.Min(1.0f, adaptiveMenuConfidence));
+        Color barFill = adaptiveMenuConfidence > 0.6f ? Color.FromArgb(200, 80, 220, 130)
+                      : adaptiveMenuConfidence > 0.3f ? Color.FromArgb(200, 220, 180, 60)
+                      : Color.FromArgb(200, 220, 100, 60);
+        using (SolidBrush barFg = new SolidBrush(barFill))
+            g.FillRectangle(barFg, barX, barY, fillW, barH);
+
+        // --- Menu Items ---
+        int itemY = my + headerH + padding;
+        for (int i = 0; i < items.Length; i++)
+        {
+            int iy = itemY + i * itemH;
+            Rectangle itemRect = new Rectangle(mx + 8, iy, menuW - 16, itemH - 4);
+
+            // Check if gaze is hovering this item
+            bool isGazeHover = false;
+            if (gazeTracking && (DateTime.Now - lastGazeTime).TotalSeconds < 0.5)
+            {
+                int gazePixelX = (int)(gazeX * width);
+                int gazePixelY = (int)(gazeY * height);
+                isGazeHover = itemRect.Contains(gazePixelX, gazePixelY);
+            }
+
+            // Item background
+            if (isGazeHover)
+            {
+                using (SolidBrush hoverBrush = new SolidBrush(Color.FromArgb(100, 80, 140, 255)))
+                    g.FillRectangle(hoverBrush, itemRect);
+                using (Pen hoverPen = new Pen(Color.FromArgb(180, 120, 180, 255), 1.5f))
+                    g.DrawRectangle(hoverPen, itemRect);
+            }
+            else
+            {
+                using (SolidBrush itemBg = new SolidBrush(Color.FromArgb(40, 255, 255, 255)))
+                    g.FillRectangle(itemBg, itemRect);
+            }
+
+            // Item text
+            using (Font itemFont = new Font("Segoe UI", 12f, isGazeHover ? FontStyle.Bold : FontStyle.Regular))
+            {
+                Color textColor = isGazeHover ? Color.FromArgb(255, 255, 230, 100) : Color.White;
+                using (SolidBrush textBrush = new SolidBrush(textColor))
+                {
+                    StringFormat sf = new StringFormat();
+                    sf.Alignment = StringAlignment.Near;
+                    sf.LineAlignment = StringAlignment.Center;
+                    g.DrawString(items[i], itemFont, textBrush, new RectangleF(itemRect.X + 10, itemRect.Y, itemRect.Width - 10, itemRect.Height), sf);
+                }
+            }
+        }
+
+        // --- Hotspot Indicator (small pulsing dot at the gaze hotspot) ---
+        if (adaptiveMenuConfidence > 0.3f)
+        {
+            // Show where the hotspot actually is (the user's most-gazed area)
+            // The hotspot is OFFSET from the menu, so compute it inversely
+            float hotX, hotY;
+            if (adaptiveMenuQuadrant.Contains("right"))
+                hotX = Math.Max(0.05f, adaptiveMenuTargetX - 0.2f);
+            else if (adaptiveMenuQuadrant.Contains("left"))
+                hotX = Math.Min(0.95f, adaptiveMenuTargetX + 0.2f);
+            else
+                hotX = adaptiveMenuTargetX;
+
+            if (adaptiveMenuQuadrant.Contains("bottom"))
+                hotY = Math.Max(0.05f, adaptiveMenuTargetY - 0.2f);
+            else if (adaptiveMenuQuadrant.Contains("top"))
+                hotY = Math.Min(0.95f, adaptiveMenuTargetY + 0.2f);
+            else
+                hotY = adaptiveMenuTargetY;
+
+            int hpx = (int)(hotX * width);
+            int hpy = (int)(hotY * height);
+
+            // Pulsing animation
+            float pulse = (float)(Math.Sin(animTick * 0.6) * 0.5 + 0.5);
+            int pulseR = (int)(12 + pulse * 8);
+            int pulseAlpha = (int)(60 + pulse * 60);
+
+            using (Pen hotPen = new Pen(Color.FromArgb(pulseAlpha, 255, 200, 80), 2f))
+            {
+                hotPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
+                g.DrawEllipse(hotPen, hpx - pulseR, hpy - pulseR, pulseR * 2, pulseR * 2);
+            }
+            using (SolidBrush hotDot = new SolidBrush(Color.FromArgb(pulseAlpha, 255, 200, 80)))
+                g.FillEllipse(hotDot, hpx - 3, hpy - 3, 6, 6);
+
+            // Label
+            using (Font hotFont = new Font("Segoe UI", 8f, FontStyle.Italic))
+            using (SolidBrush hotLabel = new SolidBrush(Color.FromArgb(pulseAlpha, 255, 220, 120)))
+                g.DrawString("gaze hotspot", hotFont, hotLabel, hpx + pulseR + 4, hpy - 6);
+        }
+    }
+
     private void UpdateBtSelectionFromPointer()
     {
         int sx = (int)(mk33X * width);
@@ -1014,14 +1317,14 @@ public class TuioDemo : Form, TuioListener
     //  Database helpers (replaces users.txt file operations)
     // =========================================================
     /// <summary>Returns a dictionary of ID → Name for all users.</summary>
-    private Dictionary<int, string> LoadUsers()
+    private Dictionary<string, string> LoadUsers()
     {
-        if (db == null) return new Dictionary<int, string>();
+        if (db == null) return new Dictionary<string, string>();
         return db.GetAllUsers().ToDictionary(u => u.Id, u => u.Name);
     }
 
     /// <summary>Returns Bluetooth address of a user by ID.</summary>
-    private string GetUserBtAddress(int id)
+    private string GetUserBtAddress(string id)
     {
         if (db == null) return null;
         var user = db.GetUserById(id);
@@ -1042,7 +1345,7 @@ public class TuioDemo : Form, TuioListener
     /// <summary>Checks if current user is a teacher.</summary>
     private bool IsCurrentUserTeacher()
     {
-        if (db == null || loggedInUserId < 0) return false;
+        if (db == null || loggedInUserId == "-1") return false;
         return db.IsTeacher(loggedInUserId);
     }
 
@@ -1085,7 +1388,16 @@ public class TuioDemo : Form, TuioListener
         try
         {
             var user = db.CreateUser(suName, "Student", selectedBtAddr);
-            suAssignedId = user.Id;
+            suAssignedId = user.TuioId.ToString();
+            
+            // --- TRIGGER FACE REGISTRATION ---
+            // Notify the vision server to capture the face for this new user
+            if (gazeConnected && gazeSocket != null) {
+                try {
+                    byte[] regMsg = Encoding.UTF8.GetBytes("REGISTER:" + suName + "\n");
+                    gazeSocket.GetStream().Write(regMsg, 0, regMsg.Length);
+                } catch { }
+            }
             RefreshWatchList();
             suPhase  = SignUpPhase.Done;
             suStatus = ""; // shown separately in Done screen
@@ -1113,7 +1425,7 @@ public class TuioDemo : Form, TuioListener
             {
                 suName             = "";
                 suStatus           = "Place markers 0-24 to spell your name.  Marker 25 (hold 2 s) = DONE.";
-                suAssignedId       = -1;
+                suAssignedId       = "-1";
                 suPhase            = SignUpPhase.NameEntry;
                 suConfirmSessionId = -1;
                 suMarkersOnTable.Clear();
@@ -1150,7 +1462,7 @@ public class TuioDemo : Form, TuioListener
                 {
                     suName             = "";
                     suStatus           = "";
-                    suAssignedId       = -1;
+                    suAssignedId       = "-1";
                     suPhase            = SignUpPhase.Idle;
                     suConfirmSessionId = -1;
                     suMarkersOnTable.Clear();
@@ -1210,7 +1522,7 @@ public class TuioDemo : Form, TuioListener
             // Check database for user - supports dynamic user lookup
             bool isGuest = (o.SymbolID == 10);
             bool isTeacher = (o.SymbolID == teacherMarkerId);
-            var dbUser = db.GetUserById(o.SymbolID);
+            var dbUser = db.GetUserById(o.SymbolID.ToString());
             bool isUser = dbUser != null;
 
             if (isGuest || isUser || isTeacher)
@@ -1386,21 +1698,21 @@ public class TuioDemo : Form, TuioListener
         {
             isTeacherMode = true;
             loggedInUser = "Teacher";
-            loggedInUserId = -1; // Special teacher marker
+            loggedInUserId = "-1"; // Special teacher marker
             signInMessage = "Welcome, Teacher! Press F4 to open Teacher Panel.";
         }
         else if (mkrId == 10)
         {
             isTeacherMode = false;
             loggedInUser = null; // guest
-            loggedInUserId = 0; // Guest ID
+            loggedInUserId = "0"; // Guest ID
             signInMessage = "Continuing as Guest!  Welcome, Storyteller!";
         }
         else
         {
             isTeacherMode = false;
-            // Look up user in database by ID
-            var user = db.GetUserById(mkrId);
+            // Look up user in database by ID (as string)
+            var user = db.GetUserById(mkrId.ToString());
             if (user != null)
             {
                 loggedInUser = user.Name;
@@ -1412,7 +1724,7 @@ public class TuioDemo : Form, TuioListener
             {
                 // Unknown marker ID - treat as guest
                 loggedInUser = "User #" + mkrId;
-                loggedInUserId = mkrId;
+                loggedInUserId = mkrId.ToString();
                 signInMessage = "Hi " + loggedInUser + "! Ready for an adventure?";
             }
         }
@@ -1421,7 +1733,7 @@ public class TuioDemo : Form, TuioListener
         try
         {
             string sessionType = "Manual";
-            if (loggedInUserId >= 0)
+            if (loggedInUserId != "-1")
                 currentAttendanceId = db.StartAttendanceSession(loggedInUserId, sessionType);
             
             // Also log to file for backward compatibility
@@ -1521,8 +1833,10 @@ public class TuioDemo : Form, TuioListener
                 case AppState.StoryBuilder:   DrawStoryBuilder(g);   break;
             }
 
+            DrawTuioObjects(g);
             DrawSkeletonAndMenu(g);
             DrawHeatmapOverlay(g);  // Draw gaze heatmap overlay if enabled
+            DrawAdaptiveMenu(g);   // Draw adaptive gaze-driven menu
         }
         catch (Exception ex)
         {
@@ -1792,6 +2106,10 @@ public class TuioDemo : Form, TuioListener
 
         // ---- Status / message ----
         DrawCentredText(g, fntBody, brWhite, signInMessage, boxY + boxH + 22);
+
+        // Debug TUIO connection
+        string debugTuio = $"TUIO Objects: {objectList.Count} | Port: {client.getPort()}";
+        g.DrawString(debugTuio, fntSmall, brWhite, 10, height - 30);
 
         // ---- Progress ring (shared) ----
         if (signInMarkerPresent)

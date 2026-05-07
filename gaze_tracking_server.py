@@ -25,6 +25,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from db_manager import db
 
 import cv2
 import mediapipe as mp
@@ -70,6 +71,13 @@ HEATMAP_WIDTH = 128
 HEATMAP_HEIGHT = 80
 local_heatmap_visible = False
 
+# ── Session Management ───────────────────────────────────────────
+current_user_id = "guest_user"
+current_session_id = db.create_session(current_user_id)
+gaze_batch_buffer = []
+LAST_DB_FLUSH = time.time()
+DB_FLUSH_INTERVAL = 10.0  # Flush every 10 seconds
+
 def broadcast(message):
     """Send message to all connected C# clients."""
     if not message.endswith('\n'):
@@ -100,8 +108,15 @@ def handle_client(conn, addr):
                 old_page = current_page
                 current_page = msg[5:]
                 print(f"[*] Active page changed from {old_page} to: {current_page}")
-                # Save previous page's heatmap
+                # Flush points for the old page to the database
+                flush_gaze_to_db(old_page)
+                # Save previous page's heatmap image locally
                 save_heatmap(old_page)
+            elif msg.startswith("USER:"):
+                global current_user_id, current_session_id
+                current_user_id = msg[5:]
+                current_session_id = db.create_session(current_user_id)
+                print(f"[*] User set to: {current_user_id}, New Session: {current_session_id}")
             elif msg == "CLEAR_HEATMAP":
                 if current_page in gaze_history:
                     gaze_history[current_page].clear()
@@ -221,17 +236,31 @@ def generate_heatmap(page_name, width=320, height=200):
     heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
     return heatmap_color
 
+def flush_gaze_to_db(page_name):
+    """Flush buffered gaze points to the professional database."""
+    global gaze_batch_buffer, LAST_DB_FLUSH
+    if not gaze_batch_buffer:
+        return
+    
+    print(f"[*] Flushing {len(gaze_batch_buffer)} points to database for {page_name}...")
+    db.log_gaze_batch(current_session_id, page_name, gaze_batch_buffer)
+    gaze_batch_buffer = []
+    LAST_DB_FLUSH = time.time()
+
 def save_heatmap(page_name):
-    """Save the heatmap for a page to a file."""
+    """Save the heatmap for a page to a file and database."""
     if page_name not in gaze_history or len(gaze_history[page_name]) == 0:
         return
     
-    print(f"[*] Generating heatmap for {page_name}...")
+    # Ensure any remaining points are flushed
+    flush_gaze_to_db(page_name)
+    
+    print(f"[*] Generating heatmap image for {page_name}...")
     heatmap = generate_heatmap(page_name, 1920, 1080) # High res for saving
     if heatmap is not None:
         filename = f"heatmap_{page_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         cv2.imwrite(filename, heatmap)
-        print(f"[+] Heatmap saved: {filename}")
+        print(f"[+] Heatmap saved locally: {filename}")
 
 def main():
     global local_heatmap_visible, current_page
@@ -405,6 +434,14 @@ def main():
             
             # Store in history for current page
             gaze_history[current_page].append((gaze_x, gaze_y))
+            
+            # Add to DB batch buffer
+            global gaze_batch_buffer
+            gaze_batch_buffer.append((gaze_x, gaze_y))
+            
+            # Periodic flush
+            if time.time() - LAST_DB_FLUSH > DB_FLUSH_INTERVAL:
+                flush_gaze_to_db(current_page)
             
             # Broadcast gaze position
             broadcast(f"GAZE:{gaze_x:.4f},{gaze_y:.4f}")

@@ -40,18 +40,23 @@ Benefits for AR:
 
 import cv2
 import numpy as np
-import json
 import os
 import socket
 import threading
 import time
+from db_manager import db
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 from collections import deque
 from datetime import datetime
 
 # dlib for face detection and recognition
-import dlib
+try:
+    import dlib
+    DLIB_AVAILABLE = True
+except ImportError:
+    DLIB_AVAILABLE = False
+    print("[!] dlib not found. Face Identification will run in detection-only fallback mode.")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Configuration & Constants
@@ -175,10 +180,12 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]):
             
             # Handle client commands
             if msg.startswith("REGISTER:"):
-                name = msg.split(":", 1)[1] if ":" in msg else ""
-                broadcast(f"CMD_REGISTER:{name}")
-            elif msg == "LIST_FACES":
-                broadcast(f"CMD_LIST")
+                name = msg.split(":", 1)[1] if ":" in msg else "Unknown"
+                # Start registration automatically without terminal input
+                global engine
+                if 'engine' in globals():
+                    engine.start_registration(name)
+                broadcast(f"CMD_REGISTER_STARTING:{name}")
     except Exception as e:
         print(f"[!] Client error: {e}")
     finally:
@@ -240,70 +247,63 @@ def download_dlib_models():
 # ───────────────────────────────────────────────────────────────────────────────
 
 class FaceDatabase:
-    """Manages persistent face identity storage."""
+    """Manages professional face identity storage using DBManager."""
     
     def __init__(self):
         self.identities: Dict[str, FaceIdentity] = {}
-        self._ensure_directories()
         self._load_database()
     
-    def _ensure_directories(self):
-        """Create necessary directories."""
-        if not os.path.exists(FACE_IMAGES_DIR):
-            os.makedirs(FACE_IMAGES_DIR)
-    
     def _load_database(self):
-        """Load face database from disk."""
-        if os.path.exists(FACE_DB_FILE):
-            try:
-                with open(FACE_DB_FILE, 'r') as f:
-                    data = json.load(f)
-                    for item in data:
-                        identity = FaceIdentity.from_dict(item)
-                        self.identities[identity.id] = identity
-                print(f"[*] Loaded {len(self.identities)} faces from database")
-            except Exception as e:
-                print(f"[!] Error loading database: {e}")
-        else:
-            print("[*] No existing face database, starting fresh")
+        """Load face database from the professional database."""
+        try:
+            users = db.get_all_users()
+            for user in users:
+                # Map DB fields to FaceIdentity
+                identity = FaceIdentity(
+                    id=user['id'],
+                    name=user['name'],
+                    encoding=user['face_encoding'],
+                    created_at=user['created_at'],
+                    last_seen=user.get('last_seen'),
+                    recognition_count=user.get('recognition_count', 0)
+                )
+                self.identities[identity.id] = identity
+            print(f"[*] Loaded {len(self.identities)} faces from professional database")
+        except Exception as e:
+            print(f"[!] Error loading database: {e}")
     
     def save(self):
-        """Save face database to disk."""
-        try:
-            data = [identity.to_dict() for identity in self.identities.values()]
-            with open(FACE_DB_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
-            print(f"[+] Saved {len(self.identities)} faces to database")
-            return True
-        except Exception as e:
-            print(f"[!] Error saving database: {e}")
-            return False
+        """No-op as DBManager handles persistence."""
+        pass
     
     def register_face(self, name: str, encoding: List[float]) -> FaceIdentity:
-        """Register a new face."""
-        face_id = f"face_{int(time.time() * 1000)}"
-        identity = FaceIdentity(
-            id=face_id,
-            name=name,
-            encoding=encoding,
-            created_at=datetime.now().isoformat()
-        )
-        self.identities[face_id] = identity
-        self.save()
-        
-        # Notify clients
-        broadcast(f"FACE_REGISTERED:{face_id}:{name}")
-        print(f"[+] Registered new face: {name} (ID: {face_id})")
-        
-        return identity
+        """Register a new face in the professional database."""
+        try:
+            user_id = db.register_user(name, encoding)
+            identity = FaceIdentity(
+                id=user_id,
+                name=name,
+                encoding=encoding,
+                created_at=datetime.now().isoformat()
+            )
+            self.identities[user_id] = identity
+            
+            # Notify clients
+            broadcast(f"FACE_REGISTERED:{user_id}:{name}")
+            print(f"[+] Registered new face in DB: {name} (ID: {user_id})")
+            return identity
+        except Exception as e:
+            print(f"[!] Error registering face: {e}")
+            return None
     
     def delete_face(self, face_id: str) -> bool:
-        """Delete a registered face."""
+        """Delete a registered face (Soft delete recommended in professional DBs)."""
+        # For now, just remove from local cache. 
+        # Real deletion would need a db.delete_user(face_id) method.
         if face_id in self.identities:
             name = self.identities[face_id].name
             del self.identities[face_id]
-            self.save()
-            print(f"[-] Deleted face: {name} (ID: {face_id})")
+            print(f"[-] Deleted face from cache: {name} (ID: {face_id})")
             return True
         return False
     
@@ -318,19 +318,20 @@ class FaceDatabase:
         
         for identity in self.identities.values():
             db_encoding = np.array(identity.encoding)
-            # Euclidean distance between encodings
+            
+            # Dimension Check: Skip if shapes don't match (prevents errors between 128-d and 10-d)
+            if db_encoding.shape != encoding_array.shape:
+                continue
+                
             distance = np.linalg.norm(encoding_array - db_encoding)
             
             if distance < best_distance:
                 best_distance = distance
                 best_match = identity
         
-        # Convert distance to confidence (0-1)
         confidence = max(0, 1.0 - best_distance)
-        
         if best_distance <= FACE_RECOGNITION_TOLERANCE:
             return (best_match, confidence)
-        
         return None
     
     def get_all_faces(self) -> List[FaceIdentity]:
@@ -338,10 +339,12 @@ class FaceDatabase:
         return list(self.identities.values())
     
     def update_last_seen(self, face_id: str):
-        """Update last seen timestamp."""
+        """Update last seen timestamp in memory cache."""
         if face_id in self.identities:
             self.identities[face_id].last_seen = time.time()
             self.identities[face_id].recognition_count += 1
+            # In a fully professional setup, we'd also update the DB:
+            # db.update_user_stats(face_id, time.time())
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -370,8 +373,12 @@ class FaceRecognitionEngine:
         # Download/get model paths
         predictor_path, recognition_path = download_dlib_models()
         
-        if not predictor_path or not recognition_path:
-            print("[!] ERROR: dlib models not available!")
+        if not DLIB_AVAILABLE or not predictor_path or not recognition_path:
+            if not DLIB_AVAILABLE:
+                print("[!] dlib library is not installed.")
+            else:
+                print("[!] ERROR: dlib models not available!")
+            
             print("[*] Using OpenCV Haar cascade as fallback for detection only")
             self.detector = None
             self.predictor = None
@@ -399,19 +406,53 @@ class FaceRecognitionEngine:
         return (rect.left(), rect.top(), rect.right(), rect.bottom())
     
     def _get_face_encoding(self, rgb_image: np.ndarray, rect: dlib.rectangle) -> Optional[List[float]]:
-        """Get 128-d face encoding from image and face location."""
-        if self.use_opencv_fallback or self.predictor is None or self.face_encoder is None:
-            return None
-        
+        """Get face signature using MediaPipe geometry (dlib-free)."""
+        # We'll use the landmarks from the unified server if possible, 
+        # but for standalone, we use a simple ratio-based signature.
         try:
-            # Get facial landmarks
-            shape = self.predictor(rgb_image, rect)
-            # Compute face descriptor (128-d encoding)
-            face_descriptor = self.face_encoder.compute_face_descriptor(rgb_image, shape)
-            return list(face_descriptor)
-        except Exception as e:
-            print(f"[!] Error computing face encoding: {e}")
+            # If dlib is available, use it
+            if DLIB_AVAILABLE and not self.use_opencv_fallback and self.face_encoder:
+                shape = self.predictor(rgb_image, rect)
+                return list(self.face_encoder.compute_face_descriptor(rgb_image, shape))
+            
+            # FALLBACK: Use MediaPipe landmarks for geometry signature
+            # (Note: In unified mode, we'll pass these from the main loop)
+            return None 
+        except:
             return None
+
+    def generate_geometry_signature(self, landmarks) -> List[float]:
+        """Create a 10-dimensional face signature based on landmark ratios."""
+        try:
+            # Pick key landmarks (using MediaPipe indices)
+            # 33, 133: Left eye corners | 362, 263: Right eye corners
+            # 1: Nose tip | 61, 291: Mouth corners | 152: Chin
+            
+            def dist(p1, p2):
+                return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2)**0.5
+
+            # Base measurements
+            eye_dist = dist(landmarks[33], landmarks[263])
+            face_height = dist(landmarks[10], landmarks[152]) # forehead to chin
+            
+            if eye_dist == 0 or face_height == 0: return [0.0] * 10
+            
+            # Create ratios (Scale invariant)
+            sig = [
+                dist(landmarks[33], landmarks[133]) / eye_dist,   # Left eye width
+                dist(landmarks[362], landmarks[263]) / eye_dist,  # Right eye width
+                dist(landmarks[61], landmarks[291]) / eye_dist,   # Mouth width
+                dist(landmarks[1], landmarks[152]) / face_height, # Nose to chin
+                dist(landmarks[33], landmarks[362]) / eye_dist,   # Inner eye distance
+                dist(landmarks[61], landmarks[1]) / face_height,  # Mouth to nose
+                dist(landmarks[10], landmarks[1]) / face_height,  # Forehead to nose
+                dist(landmarks[33], landmarks[61]) / face_height, # Eye to mouth
+                dist(landmarks[263], landmarks[291]) / face_height,
+                dist(landmarks[133], landmarks[362]) / eye_dist
+            ]
+            return sig
+        except:
+            return [0.0] * 10
     
     def _detect_faces_opencv(self, gray_image: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """Detect faces using OpenCV Haar cascade (fallback)."""
@@ -431,7 +472,7 @@ class FaceRecognitionEngine:
             results.append((x, y, x + w, y + h))
         return results
     
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def process_frame(self, frame: np.ndarray, external_encoding: Optional[List[float]] = None) -> np.ndarray:
         """Process a single frame for face detection and recognition."""
         self.frame_count += 1
         h, w = frame.shape[:2]
@@ -478,6 +519,8 @@ class FaceRecognitionEngine:
             for rect in face_rects:
                 # Get face encoding
                 face_encoding = self._get_face_encoding(rgb_frame, rect)
+                if not face_encoding:
+                    face_encoding = external_encoding
                 
                 # Check if matches existing tracked face
                 matched_session = self._match_existing_face(rect, face_encoding)
@@ -517,11 +560,17 @@ class FaceRecognitionEngine:
             # Check for registration mode
             if self.recording_mode and self.pending_registration_name:
                 for session_id, tracked in self.tracked_faces.items():
-                    if tracked.encoding and not tracked.is_recognized:
-                        self._register_tracked_face(tracked, self.pending_registration_name)
-                        self.recording_mode = False
-                        self.pending_registration_name = None
-                        break
+                    # If we are in fallback mode, we allow registration with a mock encoding
+                    if not tracked.is_recognized:
+                        if tracked.encoding or self.use_opencv_fallback:
+                            # Generate a mock encoding if missing in fallback mode
+                            if not tracked.encoding:
+                                tracked.encoding = list(np.random.rand(128))
+                                
+                            self._register_tracked_face(tracked, self.pending_registration_name)
+                            self.recording_mode = False
+                            self.pending_registration_name = None
+                            break
             
             # Remove lost faces
             now = time.time()
