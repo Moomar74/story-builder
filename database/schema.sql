@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tuio_id INT UNIQUE, -- Incremental marker ID for manual login (e.g., 11, 12, 13...)
     name TEXT NOT NULL,
-    face_encoding JSONB NOT NULL, -- Storing as JSONB array [0.12, -0.45, ...]
+    role TEXT DEFAULT 'Student', -- 'Student' or 'Teacher'
+    face_encoding JSONB NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     last_seen TIMESTAMPTZ,
     recognition_count INT DEFAULT 0,

@@ -3,16 +3,16 @@
   "WorkspaceRootPath": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|d:\\story-builder\\client\\client\\tuio11_net-master\\teacherpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
-      "RelativeMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|solutionrelative:teacherpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+      "AbsoluteMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|d:\\story-builder\\client\\client\\tuio11_net-master\\tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form",
+      "RelativeMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|solutionrelative:tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
     },
     {
       "AbsoluteMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
       "RelativeMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|solutionrelative:tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form",
-      "RelativeMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|solutionrelative:tuiodemo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+      "AbsoluteMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\teacherpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{83F18314-A320-4148-A5A5-D8FD091FC407}|TUIO_DEMO.csproj|solutionrelative:teacherpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     }
   ],
   "DocumentGroupContainers": [
@@ -22,20 +22,19 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 0,
+          "SelectedChildIndex": 2,
           "Children": [
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 2,
               "Title": "TeacherPanel.cs",
               "DocumentMoniker": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\TeacherPanel.cs",
               "RelativeDocumentMoniker": "TeacherPanel.cs",
               "ToolTip": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\TeacherPanel.cs",
               "RelativeToolTip": "TeacherPanel.cs",
-              "ViewState": "AQIAADEAAAAAAAAAAAAgwEAAAAAaAAAA",
+              "ViewState": "AQIAAAoAAAAAAAAAAAAgwCUAAAAZAAAA",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-04-23T18:13:29.21Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-04-23T18:13:29.21Z"
             },
             {
               "$type": "Document",
@@ -45,19 +44,22 @@
               "RelativeDocumentMoniker": "TuioDemo.cs",
               "ToolTip": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\TuioDemo.cs",
               "RelativeToolTip": "TuioDemo.cs",
-              "ViewState": "AQIAAIwDAAAAAAAAAAAjwJADAAAFAAAA",
+              "ViewState": "AQIAABMPAAAAAAAAAAA3wC4PAAAAAAAA",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-02-19T12:17:23.657Z"
+              "WhenOpened": "2026-02-19T12:17:23.657Z",
+              "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 0,
               "Title": "TuioDemo.cs [Design]",
               "DocumentMoniker": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\TuioDemo.cs",
               "RelativeDocumentMoniker": "TuioDemo.cs",
-              "ToolTip": "C:\\Desktop\\All\\Nader\\Semester 8\\HCI\\Client\\TUIO11_NET-master\\TuioDemo.cs [Design]",
+              "ToolTip": "D:\\story-builder\\Client\\Client\\TUIO11_NET-master\\TuioDemo.cs [Design]",
+              "RelativeToolTip": "TuioDemo.cs [Design]",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-02-19T12:17:20.904Z"
+              "WhenOpened": "2026-02-19T12:17:20.904Z",
+              "EditorCaption": " [Design]"
             }
           ]
         }

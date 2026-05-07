@@ -48,6 +48,35 @@ namespace TUIO
             RefreshStats();
         }
 
+        public void SetActiveTab(int index)
+        {
+            if (index >= 0 && index < tabControl.TabCount)
+            {
+                tabControl.SelectedIndex = index;
+            }
+        }
+
+        public void SelectStudentByIndex(int index)
+        {
+            if (index >= 0 && index < studentsGrid.Rows.Count)
+            {
+                studentsGrid.ClearSelection();
+                studentsGrid.Rows[index].Selected = true;
+                StudentsGrid_CellClick(null, new DataGridViewCellEventArgs(0, index));
+            }
+        }
+
+        public void PerformAdd() { BtnAdd_Click(null, null); }
+        public void PerformUpdate() { BtnUpdate_Click(null, null); }
+        public void PerformDelete() { BtnDelete_Click(null, null); }
+        public void PerformClear() { ClearForm(); }
+        public void PerformRefresh() { RefreshStudentsList(); RefreshStats(); RefreshAttendanceFilter(); BtnFilterAttendance_Click(null, null); }
+
+        public string CurrentNameInput { get { return txtName.Text; } set { txtName.Text = value; } }
+        public string CurrentBluetoothInput { get { return txtBluetooth.Text; } set { txtBluetooth.Text = value; } }
+        public int CurrentRoleInput { get { return cmbRole.SelectedIndex; } set { cmbRole.SelectedIndex = value; } }
+
+
         private void InitializeComponent()
         {
             this.Text = "Teacher Management Panel";
@@ -96,21 +125,24 @@ namespace TUIO
             studentsGrid.CellClick += StudentsGrid_CellClick;
 
             // Define columns
-            studentsGrid.Columns.Add("Id", "ID");
+            studentsGrid.Columns.Add("Id", "UUID"); // Hidden or small
+            studentsGrid.Columns.Add("TuioId", "Marker ID");
             studentsGrid.Columns.Add("Name", "Name");
             studentsGrid.Columns.Add("Role", "Role");
             studentsGrid.Columns.Add("Bluetooth", "Bluetooth Address");
             studentsGrid.Columns.Add("Created", "Created");
-            studentsGrid.Columns[0].Width = 50;
-            studentsGrid.Columns[1].Width = 150;
-            studentsGrid.Columns[2].Width = 80;
-            studentsGrid.Columns[3].Width = 150;
-            studentsGrid.Columns[4].Width = 120;
+            
+            studentsGrid.Columns[0].Visible = false; // Hide internal UUID
+            studentsGrid.Columns[1].Width = 70;
+            studentsGrid.Columns[2].Width = 150;
+            studentsGrid.Columns[3].Width = 80;
+            studentsGrid.Columns[4].Width = 150;
+            studentsGrid.Columns[5].Width = 120;
 
             // Input Panel
             var inputPanel = new Panel();
             inputPanel.Location = new Point(580, 10);
-            inputPanel.Size = new Size(280, 450);
+            inputPanel.Size = new Size(280, 220); // Reduced height to fit legend
             inputPanel.BackColor = Color.FromArgb(40, 40, 50);
 
             int y = 20;
@@ -215,8 +247,38 @@ namespace TUIO
             lblHint.ForeColor = Color.Gray;
             inputPanel.Controls.Add(lblHint);
 
+            // TUIO Legend Panel
+            var legendPanel = new Panel();
+            legendPanel.Location = new Point(580, 240);
+            legendPanel.Size = new Size(280, 220);
+            legendPanel.BackColor = Color.FromArgb(45, 45, 60);
+            legendPanel.BorderStyle = BorderStyle.FixedSingle;
+
+            var lblLegendTitle = new Label();
+            lblLegendTitle.Text = "TUIO CONTROL LEGEND";
+            lblLegendTitle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+            lblLegendTitle.ForeColor = Color.Cyan;
+            lblLegendTitle.Location = new Point(10, 10);
+            lblLegendTitle.Size = new Size(260, 20);
+            legendPanel.Controls.Add(lblLegendTitle);
+
+            var lblLegend = new Label();
+            lblLegend.Text = "Mkr 33: Pointer / Select Row\n" +
+                             "Mkr 1, 2, 3: Switch Tabs\n" +
+                             "Mkr 5: ADD | Mkr 6: UPDATE\n" +
+                             "Mkr 7: DELETE | Mkr 8: CLEAR\n" +
+                             "Mkr 0-24: Type Name (A-Y)\n" +
+                             "Mkr 24: Backspace\n" +
+                             "Mkr 34: Logout / Close";
+            lblLegend.Location = new Point(10, 40);
+            lblLegend.Size = new Size(260, 160);
+            lblLegend.ForeColor = Color.LightGray;
+            lblLegend.Font = new Font("Consolas", 9, FontStyle.Regular);
+            legendPanel.Controls.Add(lblLegend);
+
             page.Controls.Add(studentsGrid);
             page.Controls.Add(inputPanel);
+            page.Controls.Add(legendPanel);
 
             return page;
         }
@@ -252,7 +314,7 @@ namespace TUIO
                     string.IsNullOrWhiteSpace(txtBluetooth.Text) ? null : txtBluetooth.Text.Trim()
                 );
 
-                MessageBox.Show($"User created successfully!\nID: {user.Id}\nName: {user.Name}", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show($"User created successfully!\nName: {user.Name}\nAssigned Marker ID: {user.TuioId}", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 ClearForm();
                 RefreshStudentsList();
                 RefreshAttendanceFilter();
@@ -328,6 +390,7 @@ namespace TUIO
             {
                 studentsGrid.Rows.Add(
                     user.Id,
+                    user.TuioId,
                     user.Name,
                     user.Role,
                     user.BluetoothAddress ?? "-",
@@ -578,6 +641,18 @@ namespace TUIO
             lblInfo.Size = new Size(260, 150);
             lblInfo.ForeColor = Color.Gray;
             actionsPanel.Controls.Add(lblInfo);
+            
+            // Logout & Exit Button
+            var btnLogout = new Button();
+            btnLogout.Text = "Logout & Exit";
+            btnLogout.Location = new Point(10, 350);
+            btnLogout.Size = new Size(260, 45);
+            btnLogout.BackColor = Color.FromArgb(150, 0, 0);
+            btnLogout.ForeColor = Color.White;
+            btnLogout.FlatStyle = FlatStyle.Flat;
+            btnLogout.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+            btnLogout.Click += (s, e) => this.Close();
+            actionsPanel.Controls.Add(btnLogout);
 
             page.Controls.Add(actionsPanel);
 

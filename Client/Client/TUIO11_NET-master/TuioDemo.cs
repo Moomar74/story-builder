@@ -13,26 +13,6 @@ using System.Text;
 using TUIO;
 
 // ============================================================
-//  Entry point
-// ============================================================
-public static class Program
-{
-    [STAThread]
-    public static void Main(string[] argv)
-    {
-        int port = 3333;
-        if (argv.Length == 1)
-        {
-            int p;
-            if (int.TryParse(argv[0], out p) && p != 0) port = p;
-        }
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new TuioDemo(port));
-    }
-}
-
-// ============================================================
 //  Main Window
 // ============================================================
 public class TuioDemo : Form, TuioListener
@@ -41,10 +21,10 @@ public class TuioDemo : Form, TuioListener
     private TuioClient client;
     private Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(32);
     private Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(32);
-    private Dictionary<long, TuioBlob> blobList    = new Dictionary<long, TuioBlob>(32);
+    private Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(32);
 
     // -- Screen -----------------------------------------------
-    public static int width  = 1280;
+    public static int width = 1280;
     public static int height = 800;
     private int screenW = Screen.PrimaryScreen.Bounds.Width;
     private int screenH = Screen.PrimaryScreen.Bounds.Height;
@@ -52,49 +32,55 @@ public class TuioDemo : Form, TuioListener
     private int winLeft, winTop, winW = 1280, winH = 800;
 
     // -- App State --------------------------------------------
-    private enum AppState { SignIn, SignUp, StorySelection, StoryPlayer, StoryBuilder }
+    private enum AppState { SignIn, SignUp, StorySelection, StoryPlayer, StoryBuilder, TeacherPanel }
     private AppState _state = AppState.SignIn;
-    private AppState state 
-    { 
-        get { return _state; } 
-        set 
-        { 
+    private AppState state
+    {
+        get { return _state; }
+        set
+        {
             if (_state != value)
             {
-                _state = value; 
+                _state = value;
                 SendGazePageState();  // Notify gaze server of page change
+
+                // Auto-init teacher dashboard when entering TeacherPanel state
+                if (value == AppState.TeacherPanel)
+                {
+                    InitTeacherDashboard();
+                }
             }
-        } 
+        }
     }
 
     // =========================================================
     //  TEACHER MODE (PACT: Teacher Persona - Mena)
     // =========================================================
-    private bool   isTeacherMode = false;           // True if a teacher is logged in
-    private int    teacherMarkerId = 36;             // Marker 36 = Teacher login
+    private bool isTeacherMode = false;           // True if a teacher is logged in
+    private int teacherMarkerId = 36;             // Marker 36 = Teacher login
     private string teacherName = "Teacher";
 
     // =========================================================
     //  STUDENT PROGRESS TRACKING (PACT: Evaluate student skill)
     // =========================================================
-    private int    studentChallengesCompleted = 0;
-    private int    studentScenesCompleted = 0;
+    private int studentChallengesCompleted = 0;
+    private int studentScenesCompleted = 0;
     private DateTime studentSessionStart = DateTime.MinValue;
     private string attendanceLogFile;
 
     // =========================================================
     //  STORY PLAYER state + Animation Engine
     // =========================================================
-    private int    spStoryIndex     = -1;
-    private int    spSceneIndex     = 0;
-    private int    spDialogueIndex  = 0;
-    private bool   spInChallenge    = false;
-    private bool   spChallengeComplete = false;
-    private int    spSuccessTimer   = 0;
-    private string spFeedback       = "";
-    private float  spChallengeRotateStart = -999f;
-    private bool   spChallengeMarkerWasPlaced = false;
-    private int    spStorySelectHover = -1;
+    private int spStoryIndex = -1;
+    private int spSceneIndex = 0;
+    private int spDialogueIndex = 0;
+    private bool spInChallenge = false;
+    private bool spChallengeComplete = false;
+    private int spSuccessTimer = 0;
+    private string spFeedback = "";
+    private float spChallengeRotateStart = -999f;
+    private bool spChallengeMarkerWasPlaced = false;
+    private int spStorySelectHover = -1;
 
     // Animation phases
     private enum ScenePhase { WALK_IN, TALK, OBSTACLE, CHALLENGE, OBSTACLE_REMOVE, WALK_CONTINUE, SCENE_END }
@@ -105,29 +91,29 @@ public class TuioDemo : Form, TuioListener
     private float spChar1TargetX = 200f;  // where char1 is walking to
     private float spChar2X = 900f;        // second character X (walks in from right)
     private float spChar2TargetX = 700f;
-    private bool  spChar2Visible = false;
-    private int   spCharGroundY;          // Y position (calculated from height)
+    private bool spChar2Visible = false;
+    private int spCharGroundY;          // Y position (calculated from height)
     private float spCharSpeed = 4.5f;       // pixels per tick
 
     // Obstacle/door animation
     private float spObstacleX = 500f;     // obstacle position
     private float spObstacleAlpha = 255f; // 255=fully visible, fading to 0
-    private bool  spObstacleVisible = true;
+    private bool spObstacleVisible = true;
 
     // Walking animation frame
-    private int   spWalkFrame = 0;
-    private bool  spCharFlipped = false;  // face right by default
+    private int spWalkFrame = 0;
+    private bool spCharFlipped = false;  // face right by default
 
     // =========================================================
     //  SIGN-IN state
     // =========================================================
     // signInMarkerId:  10 = guest marker, or the user's own saved ID
-    private int   signInMarkerId      = -1;       // which marker is currently being used to log in
-    private float signInAngleAtPlace  = -999f;
-    private bool  signInMarkerPresent = false;
-    private bool  signInOk            = false;
-    private float signInProgress      = 0f;
-    private string signInMessage      = "Place marker 10 (guest) or your personal ID marker and rotate 45°";
+    private int signInMarkerId = -1;       // which marker is currently being used to log in
+    private float signInAngleAtPlace = -999f;
+    private bool signInMarkerPresent = false;
+    private bool signInOk = false;
+    private float signInProgress = 0f;
+    private string signInMessage = "Place marker 10 (guest) or your personal ID marker and rotate 45°";
 
     // Logged-in session info
     private string loggedInUser = null;   // null = Guest, otherwise the user's name from database
@@ -135,7 +121,28 @@ public class TuioDemo : Form, TuioListener
 
     // Database Manager (replaces users.txt)
     private DatabaseManager db;
-    private TeacherPanel teacherPanel = null;
+
+    // =========================================================
+    //  TEACHER DASHBOARD state (100% TUIO-driven, no WinForms)
+    // =========================================================
+    private enum TpTab { Students, Attendance, Stats }
+    private TpTab tpActiveTab = TpTab.Students;
+    private List<DatabaseManager.User> tpStudents = new List<DatabaseManager.User>();
+    private List<DatabaseManager.AttendanceRecord> tpAttendance = new List<DatabaseManager.AttendanceRecord>();
+    private int tpScrollOffset = 0;           // scroll offset for student list
+    private int tpHoveredRow = -1;            // row the pointer is hovering
+    private int tpSelectedRow = -1;           // row selected (loaded into detail)
+    private int tpHoveredButton = -1;         // which action button is hovered (0-3)
+    private int tpHoveredTab = -1;            // which tab is hovered
+    private string tpNameInput = "";           // name being typed via markers
+    private int tpRoleIndex = 0;              // 0=Student, 1=Teacher
+    private string tpStatus = "";              // status/feedback message
+    private DateTime tpStatusTime = DateTime.MinValue;
+    private HashSet<int> tpMarkersOnTable = new HashSet<int>();
+    private float tpMk33AngleAtPlace = -999f; // for rotation-click detection
+    private bool tpMk33ClickFired = false;    // prevent repeated clicks
+    private const int TP_MAX_VISIBLE_ROWS = 14;
+    private readonly string[] tpRoles = { "Student", "Teacher" };
 
     // =========================================================
     //  SIGN-UP state  (TUIO-based, fully redesigned)
@@ -160,35 +167,35 @@ public class TuioDemo : Form, TuioListener
     //  25    → CONFIRM / DONE (hold for 2 s to submit name; or rotate 45° quickly)
     //  ─────────────────────────────
 
-    private const int CONFIRM_MARKER   = 25;   // marker that confirms the name
+    private const int CONFIRM_MARKER = 25;   // marker that confirms the name
     private const int BACKSPACE_MARKER = 24;   // same marker used for letter Y also deletes last char if name > 0
 
     private enum SignUpPhase { Idle, NameEntry, Done }
     private SignUpPhase suPhase = SignUpPhase.Idle;
 
-    private string suName      = "";          // name being typed
+    private string suName = "";          // name being typed
     private string suAssignedId = "-1";       // auto-incremented ID assigned on success (UUID)
-    private string suStatus    = "";          // status / feedback message
+    private string suStatus = "";          // status / feedback message
 
     // Confirm-hold tracking
-    private long   suConfirmSessionId  = -1;  // session of the confirm marker currently on table
+    private long suConfirmSessionId = -1;  // session of the confirm marker currently on table
     private DateTime suConfirmPlacedAt = DateTime.MinValue;
-    private const int CONFIRM_HOLD_MS  = 2000; // hold 2 s to confirm
+    private const int CONFIRM_HOLD_MS = 2000; // hold 2 s to confirm
 
     // Prevent re-adding the same marker instance twice without removing it first
     private HashSet<int> suMarkersOnTable = new HashSet<int>(); // by SymbolID
 
     // -- Animation --------------------------------------------
     private System.Windows.Forms.Timer animTimer = new System.Windows.Forms.Timer();
-    private int   animTick  = 0;
+    private int animTick = 0;
     private float bgParallax = 0f;
 
     // -- Assets -----------------------------------------------
     private string animalsDir;
     private Dictionary<string, Image[]> animalFrames = new Dictionary<string, Image[]>();
-    private readonly string[] ANIMALS      = { "lion", "fox", "eagle", "wolf" };
+    private readonly string[] ANIMALS = { "lion", "fox", "eagle", "wolf" };
     private readonly string[] ANIMAL_NAMES = { "The Brave Lion", "The Clever Fox", "The Swift Eagle", "The Wild Wolf" };
-    private readonly Color[]  ANIMAL_COLORS =
+    private readonly Color[] ANIMAL_COLORS =
     {
         Color.FromArgb(210, 132, 26),
         Color.FromArgb(232, 101, 26),
@@ -215,27 +222,27 @@ public class TuioDemo : Form, TuioListener
         { Color.BurlyWood, Color.SaddleBrown },
     };
 
-    private int    sceneIndex = 0;
-    private float  sceneMood  = 0f;
-    private string storyText  = "";
+    private int sceneIndex = 0;
+    private float sceneMood = 0f;
+    private string storyText = "";
 
     // -- Marker 33 = pointer / mouse for scene selection ------
-    private bool  mk33Present = false;
+    private bool mk33Present = false;
     private float mk33X = 0f, mk33Y = 0f;  // normalized TUIO coords (0-1)
-    private int   mk33HoverScene = -1;      // which scene row is being hovered (-1 = none)
+    private int mk33HoverScene = -1;      // which scene row is being hovered (-1 = none)
 
     // -- Sockets & Bluetooth --------------------------------
     private SocketClient socketClient;
     private Thread socketThread;
-    private bool   isSocketActive = true;
-    private string lastSocketMsg  = "";
+    private bool isSocketActive = true;
+    private string lastSocketMsg = "";
     private List<string[]> discoveredBtDevices = new List<string[]>(); // string[0]=name, string[1]=address
-    private string selectedBtAddr  = null;
-    private string selectedBtName  = "None Selected";
-    private int    btHoverIndex    = -1;
+    private string selectedBtAddr = null;
+    private string selectedBtName = "None Selected";
+    private int btHoverIndex = -1;
 
     // -- Fonts & Brushes --------------------------------------
-    private Font  fntTitle, fntBody, fntSmall, fntHuge, fntMono;
+    private Font fntTitle, fntBody, fntSmall, fntHuge, fntMono;
     private Brush brWhite, brGold;
 
     // -- Story Assets -----------------------------------------
@@ -315,13 +322,13 @@ public class TuioDemo : Form, TuioListener
         }
 
         this.ClientSize = new Size(width, height);
-        this.Text       = "Immersive Story Builder - TUIO";
-        this.Name       = "ImmersiveStoryBuilder";
-        this.BackColor  = Color.Black;
+        this.Text = "Immersive Story Builder - TUIO";
+        this.Name = "ImmersiveStoryBuilder";
+        this.BackColor = Color.Black;
 
         this.SetStyle(
             ControlStyles.AllPaintingInWmPaint |
-            ControlStyles.UserPaint            |
+            ControlStyles.UserPaint |
             ControlStyles.DoubleBuffer, true);
 
         this.Closing += new CancelEventHandler(Form_Closing);
@@ -333,7 +340,7 @@ public class TuioDemo : Form, TuioListener
         animTimer.Interval = 80;
         animTimer.Tick += (s, e) =>
         {
-            animTick  = (animTick + 1) % 10;
+            animTick = (animTick + 1) % 10;
             bgParallax += 0.3f;
             // Check confirm-hold timer each tick
             if (state == AppState.SignUp && suPhase == SignUpPhase.NameEntry &&
@@ -439,23 +446,36 @@ public class TuioDemo : Form, TuioListener
                     string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (string msg in messages)
                     {
-                        this.Invoke((MethodInvoker)delegate { 
-                            if (msg.StartsWith("FACE_DETECTED:")) {
+                        this.Invoke((MethodInvoker)delegate {
+                            if (msg.StartsWith("FACE_DETECTED:"))
+                            {
                                 string[] p = msg.Split(':');
-                                if (p.Length >= 3) {
+                                if (p.Length >= 3)
+                                {
                                     string userId = p[1];
-                                    string userName = p[2];
-                                    // AUTOMATIC LOGIN
-                                    if (state == AppState.SignIn && !signInOk) {
-                                        loggedInUser = userName;
-                                        loggedInUserId = userId; // Keep as UUID string
-                                        signInOk = true;
-                                        state = AppState.StorySelection; // Direct to selection!
-                                        signInMessage = "Welcome back, " + userName + "!";
-                                        
-                                        // Record login in local DB too
-                                        db.RecordLogin(userId);
-                                        Invalidate();
+                                    if (state == AppState.SignIn && !signInOk)
+                                    {
+                                        var user = db.GetUserById(userId);
+                                        if (user != null)
+                                        {
+                                            loggedInUser = user.Name;
+                                            loggedInUserId = user.Id;
+                                            signInOk = true;
+                                            signInMessage = "Welcome back, " + user.Name + "!";
+
+                                            // Role-based redirection
+                                            if (user.Role == "Teacher")
+                                            {
+                                                state = AppState.TeacherPanel;
+                                            }
+                                            else
+                                            {
+                                                state = AppState.StorySelection;
+                                            }
+
+                                            db.RecordLogin(user.Id);
+                                            Invalidate();
+                                        }
                                     }
                                 }
                             }
@@ -550,7 +570,7 @@ public class TuioDemo : Form, TuioListener
                 db.EndAttendanceSession(currentAttendanceId, studentScenesCompleted, studentChallengesCompleted);
                 currentAttendanceId = -1;
             }
-            
+
             // Log the logout to attendance file for teacher records
             try
             {
@@ -567,7 +587,7 @@ public class TuioDemo : Form, TuioListener
             signInMessage = "Student out of range. Session closed automatically.";
             Invalidate();
         }
-        else 
+        else
         {
             msg = msg.ToLower();
             if (msg == "next")
@@ -602,7 +622,7 @@ public class TuioDemo : Form, TuioListener
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead == 0) break;
-                    
+
                     string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (string msg in messages)
@@ -721,7 +741,7 @@ public class TuioDemo : Form, TuioListener
                 {
                     circMenuSelected = idx;
                     circMenuSelectTime = DateTime.Now;
-                    
+
                     // Menu actions
                     if (idx < 4) // Stories
                     {
@@ -732,7 +752,7 @@ public class TuioDemo : Form, TuioListener
                     }
                     else if (idx == 4) // Back
                         state = AppState.StorySelection;
-                    
+
                     circMenuVisible = false; // Auto close
                     Invalidate();
                 }
@@ -761,7 +781,7 @@ public class TuioDemo : Form, TuioListener
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead == 0) break;
-                    
+
                     string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (string msg in messages)
@@ -796,7 +816,7 @@ public class TuioDemo : Form, TuioListener
                     gazeY = y;
                     lastGazeTime = DateTime.Now;
                     gazeTracking = true;
-                    
+
                     // Store gaze point for current page's heatmap
                     string pageName = state.ToString();
                     if (gazeHeatmapData.ContainsKey(pageName))
@@ -806,7 +826,7 @@ public class TuioDemo : Form, TuioListener
                         int pageIdx = Array.IndexOf(heatmapPageNames, pageName);
                         if (pageIdx >= 0) heatmapCache[pageIdx] = null;
                     }
-                    
+
                     if (heatmapVisible) Invalidate();
                 }
             }
@@ -875,12 +895,12 @@ public class TuioDemo : Form, TuioListener
         using (Graphics g = Graphics.FromImage(heatmap))
         {
             g.Clear(Color.Transparent);
-            
+
             // Create a grid-based density map
             int gridW = w / heatmapGridSize + 1;
             int gridH = h / heatmapGridSize + 1;
             int[,] density = new int[gridH, gridW];
-            
+
             // Count gaze points in each grid cell
             foreach (PointF p in gazeHeatmapData[pageName])
             {
@@ -889,15 +909,15 @@ public class TuioDemo : Form, TuioListener
                 if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH)
                     density[gy, gx]++;
             }
-            
+
             // Find max density for normalization
             int maxDensity = 0;
             for (int y = 0; y < gridH; y++)
                 for (int x = 0; x < gridW; x++)
                     maxDensity = Math.Max(maxDensity, density[y, x]);
-            
+
             if (maxDensity == 0) return heatmap;
-            
+
             // Draw heatmap cells with Gaussian blur effect
             for (int y = 0; y < gridH; y++)
             {
@@ -907,17 +927,17 @@ public class TuioDemo : Form, TuioListener
                     {
                         float intensity = (float)density[y, x] / maxDensity;
                         int alpha = (int)(intensity * 200);  // Max 200 alpha for overlay
-                        
+
                         // Color gradient: blue (low) -> green -> yellow -> red (high)
                         Color heatColor = GetHeatColor(intensity);
                         using (SolidBrush brush = new SolidBrush(Color.FromArgb(alpha, heatColor)))
                         {
                             // Draw slightly larger than grid for smoothing
                             int spread = 2;
-                            g.FillEllipse(brush, 
-                                x * heatmapGridSize - spread, 
-                                y * heatmapGridSize - spread, 
-                                heatmapGridSize + spread * 2, 
+                            g.FillEllipse(brush,
+                                x * heatmapGridSize - spread,
+                                y * heatmapGridSize - spread,
+                                heatmapGridSize + spread * 2,
                                 heatmapGridSize + spread * 2);
                         }
                     }
@@ -960,23 +980,23 @@ public class TuioDemo : Form, TuioListener
     private void DrawHeatmapOverlay(Graphics g)
     {
         if (!heatmapVisible) return;
-        
+
         string pageName = state.ToString();
         int pageIdx = Array.IndexOf(heatmapPageNames, pageName);
         if (pageIdx < 0) return;
-        
+
         // Generate heatmap if not cached
         if (heatmapCache[pageIdx] == null)
         {
             heatmapCache[pageIdx] = GenerateHeatmap(pageName, width, height);
         }
-        
+
         if (heatmapCache[pageIdx] != null)
         {
             // Draw heatmap with transparency
             g.DrawImage(heatmapCache[pageIdx], 0, 0);
         }
-        
+
         // Draw heatmap stats
         if (gazeHeatmapData.ContainsKey(pageName))
         {
@@ -1000,7 +1020,7 @@ public class TuioDemo : Form, TuioListener
         }
         for (int i = 0; i < heatmapCache.Length; i++)
             heatmapCache[i] = null;
-        
+
         // Tell server to clear data
         if (gazeSocket != null && gazeSocket.Connected)
         {
@@ -1266,13 +1286,13 @@ public class TuioDemo : Form, TuioListener
     private void InitFonts()
     {
         string fName = "Comic Sans MS";
-        fntHuge  = new Font(fName, 36f, FontStyle.Bold);
+        fntHuge = new Font(fName, 36f, FontStyle.Bold);
         fntTitle = new Font(fName, 20f, FontStyle.Bold);
-        fntBody  = new Font(fName, 14f, FontStyle.Bold);
+        fntBody = new Font(fName, 14f, FontStyle.Bold);
         fntSmall = new Font(fName, 10f, FontStyle.Bold);
-        fntMono  = new Font("Courier New", 14f, FontStyle.Bold);
-        brWhite  = new SolidBrush(Color.White);
-        brGold   = new SolidBrush(Color.FromArgb(255, 215, 0));
+        fntMono = new Font("Courier New", 14f, FontStyle.Bold);
+        brWhite = new SolidBrush(Color.White);
+        brGold = new SolidBrush(Color.FromArgb(255, 215, 0));
     }
 
     private void LoadAnimalFrames()
@@ -1331,15 +1351,74 @@ public class TuioDemo : Form, TuioListener
         return user?.BluetoothAddress;
     }
 
-    /// <summary>Opens the Teacher Management Panel.</summary>
-    private void OpenTeacherPanel()
+    /// <summary>Initialises the TUIO-driven Teacher Dashboard (no WinForms).</summary>
+    private void InitTeacherDashboard()
     {
-        if (teacherPanel == null || teacherPanel.IsDisposed)
+        tpActiveTab = TpTab.Students;
+        tpScrollOffset = 0;
+        tpHoveredRow = -1;
+        tpSelectedRow = -1;
+        tpHoveredButton = -1;
+        tpHoveredTab = -1;
+        tpNameInput = "";
+        tpRoleIndex = 0;
+        tpStatus = "";
+        tpMarkersOnTable.Clear();
+        tpMk33AngleAtPlace = -999f;
+        tpMk33ClickFired = false;
+        TpRefreshData();
+        Cursor.Hide();
+        Invalidate();
+    }
+
+    private void TpRefreshData()
+    {
+        if (db == null) return;
+        tpStudents = db.GetAllUsers();
+        tpAttendance = db.GetAttendanceHistory();
+    }
+
+    private void TpPerformAdd()
+    {
+        if (string.IsNullOrWhiteSpace(tpNameInput)) { tpStatus = "Type a name first (markers 0-23)"; tpStatusTime = DateTime.Now; return; }
+        try
         {
-            teacherPanel = new TeacherPanel(db);
+            var user = db.CreateUser(tpNameInput.Trim(), tpRoles[tpRoleIndex]);
+            tpStatus = "Created " + user.Name + " (Marker " + user.TuioId + ")"; tpStatusTime = DateTime.Now;
+            tpNameInput = ""; tpRoleIndex = 0; tpSelectedRow = -1;
+            TpRefreshData();
         }
-        teacherPanel.Show();
-        teacherPanel.BringToFront();
+        catch (Exception ex) { tpStatus = "Error: " + ex.Message; tpStatusTime = DateTime.Now; }
+    }
+
+    private void TpPerformUpdate()
+    {
+        if (tpSelectedRow < 0 || tpSelectedRow >= tpStudents.Count) { tpStatus = "Select a student first"; tpStatusTime = DateTime.Now; return; }
+        var user = tpStudents[tpSelectedRow];
+        if (tpNameInput.Length > 0) user.Name = tpNameInput.Trim();
+        user.Role = tpRoles[tpRoleIndex];
+        db.UpdateUser(user);
+        tpStatus = "Updated " + user.Name; tpStatusTime = DateTime.Now;
+        tpNameInput = ""; tpSelectedRow = -1;
+        TpRefreshData();
+    }
+
+    private void TpPerformDelete()
+    {
+        if (tpSelectedRow < 0 || tpSelectedRow >= tpStudents.Count) { tpStatus = "Select a student first"; tpStatusTime = DateTime.Now; return; }
+        var user = tpStudents[tpSelectedRow];
+        db.DeleteUser(user.Id);
+        tpStatus = "Deleted " + user.Name; tpStatusTime = DateTime.Now;
+        tpNameInput = ""; tpSelectedRow = -1;
+        TpRefreshData();
+    }
+
+    private void TpClearForm()
+    {
+        tpNameInput = "";
+        tpRoleIndex = 0;
+        tpSelectedRow = -1;
+        tpStatus = "Form cleared"; tpStatusTime = DateTime.Now;
     }
 
     /// <summary>Checks if current user is a teacher.</summary>
@@ -1352,7 +1431,7 @@ public class TuioDemo : Form, TuioListener
     private void RefreshWatchList()
     {
         if (socketClient == null || db == null) return;
-        
+
         List<string> watchlist = new List<string>();
         var users = db.GetAllUsers();
         foreach (var user in users)
@@ -1363,7 +1442,7 @@ public class TuioDemo : Form, TuioListener
                 watchlist.Add(user.BluetoothAddress + "|" + user.Id);
             }
         }
-        
+
         if (watchlist.Count > 0)
         {
             socketClient.SendMessage("WATCH_BT:" + string.Join(",", watchlist));
@@ -1389,17 +1468,20 @@ public class TuioDemo : Form, TuioListener
         {
             var user = db.CreateUser(suName, "Student", selectedBtAddr);
             suAssignedId = user.TuioId.ToString();
-            
+
             // --- TRIGGER FACE REGISTRATION ---
             // Notify the vision server to capture the face for this new user
-            if (gazeConnected && gazeSocket != null) {
-                try {
+            if (gazeConnected && gazeSocket != null)
+            {
+                try
+                {
                     byte[] regMsg = Encoding.UTF8.GetBytes("REGISTER:" + suName + "\n");
                     gazeSocket.GetStream().Write(regMsg, 0, regMsg.Length);
-                } catch { }
+                }
+                catch { }
             }
             RefreshWatchList();
-            suPhase  = SignUpPhase.Done;
+            suPhase = SignUpPhase.Done;
             suStatus = ""; // shown separately in Done screen
             // Reset confirm tracking
             suConfirmSessionId = -1;
@@ -1417,16 +1499,23 @@ public class TuioDemo : Form, TuioListener
     {
         lock (objectList) objectList[o.SessionID] = o;
 
+        // Track marker 33 placement angle for rotation-click
+        if (o.SymbolID == 33)
+        {
+            tpMk33AngleAtPlace = o.Angle;
+            tpMk33ClickFired = false;
+        }
+
         // ---- Navigation markers  (always checked first) -----
         // Marker 35 = go to Sign Up   (from Sign In screen)
         if (o.SymbolID == 35 && state == AppState.SignIn)
         {
             this.Invoke((MethodInvoker)delegate
             {
-                suName             = "";
-                suStatus           = "Place markers 0-24 to spell your name.  Marker 25 (hold 2 s) = DONE.";
-                suAssignedId       = "-1";
-                suPhase            = SignUpPhase.NameEntry;
+                suName = "";
+                suStatus = "Place markers 0-24 to spell your name.  Marker 25 (hold 2 s) = DONE.";
+                suAssignedId = "-1";
+                suPhase = SignUpPhase.NameEntry;
                 suConfirmSessionId = -1;
                 suMarkersOnTable.Clear();
                 state = AppState.SignUp;
@@ -1460,13 +1549,22 @@ public class TuioDemo : Form, TuioListener
                 }
                 else if (state == AppState.SignUp)
                 {
-                    suName             = "";
-                    suStatus           = "";
-                    suAssignedId       = "-1";
-                    suPhase            = SignUpPhase.Idle;
+                    suName = "";
+                    suStatus = "";
+                    suAssignedId = "-1";
+                    suPhase = SignUpPhase.Idle;
                     suConfirmSessionId = -1;
                     suMarkersOnTable.Clear();
                     state = AppState.SignIn;
+                }
+                else if (state == AppState.TeacherPanel)
+                {
+                    state = AppState.SignIn;
+                    signInOk = false;
+                    signInMarkerPresent = false;
+                    signInProgress = 0f;
+                    signInMarkerId = -1;
+                    Cursor.Show();
                 }
                 Invalidate();
             });
@@ -1511,7 +1609,8 @@ public class TuioDemo : Form, TuioListener
         {
             this.Invoke((MethodInvoker)delegate
             {
-                OpenTeacherPanel();
+                state = AppState.TeacherPanel;
+                Invalidate();
             });
             return;
         }
@@ -1519,24 +1618,57 @@ public class TuioDemo : Form, TuioListener
         // ---- Sign-In ----------------------------------------
         if (state == AppState.SignIn && !signInMarkerPresent)
         {
-            // Check database for user - supports dynamic user lookup
-            bool isGuest = (o.SymbolID == 10);
-            bool isTeacher = (o.SymbolID == teacherMarkerId);
+            // 1. Check for manual user login (Markers 11+)
             var dbUser = db.GetUserById(o.SymbolID.ToString());
-            bool isUser = dbUser != null;
-
-            if (isGuest || isUser || isTeacher)
+            if (dbUser != null && state == AppState.SignIn && !signInOk)
             {
-                signInMarkerId      = o.SymbolID;
-                signInMarkerPresent = true;
-                signInAngleAtPlace  = o.Angle;
+                loggedInUser = dbUser.Name;
+                loggedInUserId = dbUser.Id;
+                signInOk = true;
 
-                if (isTeacher)
-                    signInMessage = "Teacher mode: Place marker 36 and rotate 45° to sign in...";
-                else if (isGuest)
-                    signInMessage = "Rotate marker 10 by 45° to continue as Guest...";
+                // Role-based redirection
+                if (dbUser.Role == "Teacher")
+                {
+                    state = AppState.TeacherPanel;
+                }
                 else
-                    signInMessage = "Hello, " + dbUser.Name + "!  Rotate your marker 45° to sign in...";
+                {
+                    state = AppState.StorySelection;
+                }
+
+                db.RecordLogin(dbUser.Id);
+                Invalidate();
+                return;
+            }
+
+            // 2. Fallback: Specific hardcoded markers
+            // ---- Universal Back Marker (34) ----
+            if (o.SymbolID == 34)
+            {
+                this.Invoke((MethodInvoker)delegate {
+                    if (state == AppState.SignUp) state = AppState.SignIn;
+                    else if (state == AppState.StorySelection) state = AppState.SignIn;
+                    else if (state == AppState.StoryPlayer) state = AppState.StorySelection;
+                    else if (state == AppState.StoryBuilder) state = AppState.StorySelection;
+                });
+                return;
+            }
+
+            // ---- Teacher Master Key (Marker 36) ----
+            if (o.SymbolID == 36) // Teacher Master Key
+            {
+                state = AppState.TeacherPanel;
+                Invalidate();
+                return;
+            }
+
+            bool isGuest = (o.SymbolID == 10);
+            if (isGuest)
+            {
+                signInMarkerId = o.SymbolID;
+                signInMarkerPresent = true;
+                signInAngleAtPlace = o.Angle;
+                signInMessage = "Rotate marker 10 by 45° to continue as Guest...";
                 return;
             }
         }
@@ -1549,8 +1681,8 @@ public class TuioDemo : Form, TuioListener
             // Confirm marker (25) held tracking
             if (sym == CONFIRM_MARKER)
             {
-                suConfirmSessionId  = o.SessionID;
-                suConfirmPlacedAt   = DateTime.Now;
+                suConfirmSessionId = o.SessionID;
+                suConfirmPlacedAt = DateTime.Now;
                 suStatus = suName.Length > 0
                     ? "Hold marker 25 for 2 s to confirm name \"" + suName + "\"..."
                     : "Enter at least one letter first (markers 0-24 = A-Y).";
@@ -1563,7 +1695,7 @@ public class TuioDemo : Form, TuioListener
                 // Backspace on marker 24 if name has letters
                 if (sym == BACKSPACE_MARKER && suName.Length > 0)
                 {
-                    suName   = suName.Substring(0, suName.Length - 1);
+                    suName = suName.Substring(0, suName.Length - 1);
                     suStatus = "Last letter removed.  Remove marker 24 before next action.";
                     suMarkersOnTable.Add(sym);
                     return;
@@ -1586,8 +1718,8 @@ public class TuioDemo : Form, TuioListener
         {
             this.Invoke((MethodInvoker)delegate
             {
-                spStoryIndex    = o.SymbolID;
-                spSceneIndex    = 0;
+                spStoryIndex = o.SymbolID;
+                spSceneIndex = 0;
                 ResetSceneAnimation();
                 state = AppState.StoryPlayer;
                 Invalidate();
@@ -1601,6 +1733,54 @@ public class TuioDemo : Form, TuioListener
             this.Invoke((MethodInvoker)delegate { AdvanceStoryDialogue(); });
             return;
         }
+
+        // ---- Teacher Dashboard: TUIO Controls (fully custom-drawn) ----
+        if (state == AppState.TeacherPanel)
+        {
+            int sym = o.SymbolID;
+
+            // Tab Navigation
+            if (sym == 1) { tpActiveTab = TpTab.Students; TpRefreshData(); }
+            if (sym == 2) { tpActiveTab = TpTab.Attendance; TpRefreshData(); }
+            if (sym == 3) { tpActiveTab = TpTab.Stats; TpRefreshData(); }
+
+            // CRUD Actions
+            if (sym == 5) TpPerformAdd();
+            if (sym == 6) TpPerformUpdate();
+            if (sym == 7) TpPerformDelete();
+            if (sym == 8) TpClearForm();
+
+            // Role toggle
+            if (sym == 9) { tpRoleIndex = (tpRoleIndex + 1) % 2; tpStatus = "Role: " + tpRoles[tpRoleIndex]; tpStatusTime = DateTime.Now; }
+
+            // Scroll list
+            if (sym == 10) { tpScrollOffset = Math.Max(0, tpScrollOffset - 1); }
+            if (sym == 11) { tpScrollOffset = Math.Min(Math.Max(0, tpStudents.Count - TP_MAX_VISIBLE_ROWS), tpScrollOffset + 1); }
+
+            // Letter entry for Name field
+            if (sym >= 0 && sym <= 24 && sym != 5 && sym != 6 && sym != 7 && sym != 8 && sym != 9 && sym != 10 && sym != 11)
+            {
+                if (tpMarkersOnTable.Contains(sym)) return;
+                tpMarkersOnTable.Add(sym);
+
+                if (sym == 24) // Backspace
+                {
+                    if (tpNameInput.Length > 0)
+                        tpNameInput = tpNameInput.Substring(0, tpNameInput.Length - 1);
+                }
+                else
+                {
+                    char letter = (char)('A' + sym);
+                    tpNameInput += letter;
+                }
+            }
+
+            // Select hovered row
+            if (sym == 25 && tpHoveredRow >= 0) { tpSelectedRow = tpHoveredRow; var u = tpStudents[tpSelectedRow]; tpNameInput = u.Name; tpRoleIndex = u.Role == "Teacher" ? 1 : 0; tpStatus = "Selected: " + u.Name; tpStatusTime = DateTime.Now; }
+
+            return;
+        }
+
 
         // ---- Story Player: challenge markers (5-8) ----
         if (state == AppState.StoryPlayer && spInChallenge && !spChallengeComplete)
@@ -1649,11 +1829,11 @@ public class TuioDemo : Form, TuioListener
         // Rotation on story markers 0-3 drives scene
         if (o.SymbolID >= 0 && o.SymbolID <= 3 && state == AppState.StoryBuilder)
         {
-            sceneMood  = o.Angle / (float)(2 * Math.PI);
+            sceneMood = o.Angle / (float)(2 * Math.PI);
             sceneIndex = (int)(sceneMood * SCENES.Length) % SCENES.Length;
         }
 
-        // Marker 33 = pointer cursor in StoryBuilder
+        // Marker 33 = pointer cursor
         if (o.SymbolID == 33)
         {
             mk33Present = true;
@@ -1661,6 +1841,27 @@ public class TuioDemo : Form, TuioListener
             mk33Y = o.Y;
             if (state == AppState.StoryBuilder) UpdateSceneFromPointer();
             else if (state == AppState.SignUp) UpdateBtSelectionFromPointer();
+            else if (state == AppState.TeacherPanel) UpdateTpPointer();
+
+            // Rotation-click: detect >=45° rotation from placement angle
+            if (state == AppState.TeacherPanel && tpMk33AngleAtPlace > -900f && !tpMk33ClickFired)
+            {
+                float rotDelta = Math.Abs(o.Angle - tpMk33AngleAtPlace);
+                if (rotDelta > (float)Math.PI) rotDelta = (float)(2 * Math.PI) - rotDelta;
+                if (rotDelta >= (float)(Math.PI / 4)) // 45 degrees
+                {
+                    tpMk33ClickFired = true;
+                    // Click on hovered row
+                    if (tpHoveredRow >= 0 && tpHoveredRow < tpStudents.Count)
+                    {
+                        tpSelectedRow = tpHoveredRow;
+                        var u = tpStudents[tpSelectedRow];
+                        tpNameInput = u.Name;
+                        tpRoleIndex = u.Role == "Teacher" ? 1 : 0;
+                        tpStatus = "Selected: " + u.Name; tpStatusTime = DateTime.Now;
+                    }
+                }
+            }
         }
 
         // ---- Story Player: ROTATE challenge ----
@@ -1735,7 +1936,7 @@ public class TuioDemo : Form, TuioListener
             string sessionType = "Manual";
             if (loggedInUserId != "-1")
                 currentAttendanceId = db.StartAttendanceSession(loggedInUserId, sessionType);
-            
+
             // Also log to file for backward compatibility
             string logEntry = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " | ID: " + mkrId + " | Name: " + (loggedInUser ?? "Guest") + " | Status: Logged In";
             File.AppendAllText(attendanceLogFile, logEntry + Environment.NewLine);
@@ -1746,10 +1947,10 @@ public class TuioDemo : Form, TuioListener
         {
             System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
             t.Interval = 1800;
-            t.Tick += (s, e2) => { 
-                t.Stop(); 
-                state = AppState.StorySelection; 
-                Invalidate(); 
+            t.Tick += (s, e2) => {
+                t.Stop();
+                state = AppState.StorySelection;
+                Invalidate();
             };
             t.Start();
         });
@@ -1763,32 +1964,33 @@ public class TuioDemo : Form, TuioListener
         if (state == AppState.SignIn && o.SymbolID == signInMarkerId && !signInOk)
         {
             signInMarkerPresent = false;
-            signInProgress      = 0f;
-            signInMarkerId      = -1;
-            signInMessage       = "Place marker 10 (guest) or your personal ID marker and rotate 45\u00b0";
+            signInProgress = 0f;
+            signInMarkerId = -1;
+            signInMessage = "Place marker 10 (guest) or your personal ID marker and rotate 45\u00b0";
         }
 
         // Marker 33 pointer removed
         if (o.SymbolID == 33)
         {
-            mk33Present   = false;
+            mk33Present = false;
             mk33HoverScene = -1;
+            tpHoveredRow = -1;
+            tpMk33AngleAtPlace = -999f;
+            tpMk33ClickFired = false;
         }
 
-        // Release marker so it can be placed again for the next letter
+        // Release marker so it can be placed again for the next letter (SignUp)
         if (state == AppState.SignUp && suPhase == SignUpPhase.NameEntry)
         {
             suMarkersOnTable.Remove(o.SymbolID);
-
-            if (o.SymbolID == CONFIRM_MARKER && suConfirmSessionId == o.SessionID)
-            {
-                suConfirmSessionId = -1;
-                if (suPhase != SignUpPhase.Done)
-                    suStatus = suName.Length > 0
-                        ? "Name so far: \"" + suName.ToUpper() + "\".  Place markers 0-24 to add letters."
-                        : "Place markers 0-24 to spell your name.  Marker 25 (hold) = Done.";
-            }
         }
+
+        // Release marker in Teacher Dashboard
+        if (state == AppState.TeacherPanel)
+        {
+            tpMarkersOnTable.Remove(o.SymbolID);
+        }
+
 
         // ---- Story Player: REMOVE challenge ----
         if (state == AppState.StoryPlayer && spInChallenge && !spChallengeComplete
@@ -1803,46 +2005,83 @@ public class TuioDemo : Form, TuioListener
         }
     }
 
-    public void addTuioCursor(TuioCursor c)  { lock (cursorList) cursorList[c.SessionID] = c; }
-    public void updateTuioCursor(TuioCursor c){ lock (cursorList) cursorList[c.SessionID] = c; }
-    public void removeTuioCursor(TuioCursor c){ lock (cursorList) cursorList.Remove(c.SessionID); }
-    public void addTuioBlob(TuioBlob b)  { lock (blobList) blobList[b.SessionID] = b; }
-    public void updateTuioBlob(TuioBlob b){ lock (blobList) blobList[b.SessionID] = b; }
-    public void removeTuioBlob(TuioBlob b){ lock (blobList) blobList.Remove(b.SessionID); }
+    public void addTuioCursor(TuioCursor c)
+    {
+        lock (cursorList) cursorList[c.SessionID] = c;
+        // Fingers act as pointer 33
+        mk33Present = true;
+        mk33X = c.X;
+        mk33Y = c.Y;
+
+        // Tap to advance dialogue in StoryPlayer
+        if (state == AppState.StoryPlayer)
+        {
+            this.Invoke((MethodInvoker)delegate { AdvanceStoryDialogue(); });
+        }
+    }
+
+    public void updateTuioCursor(TuioCursor c)
+    {
+        lock (cursorList) cursorList[c.SessionID] = c;
+        mk33X = c.X;
+        mk33Y = c.Y;
+        if (state == AppState.TeacherPanel) UpdateTpPointer();
+    }
+    public void removeTuioCursor(TuioCursor c)
+    {
+        lock (cursorList) cursorList.Remove(c.SessionID);
+        if (cursorList.Count == 0 && !objectList.Values.Any(o => o.SymbolID == 33))
+            mk33Present = false;
+    }
+
+    public void addTuioBlob(TuioBlob b) { lock (blobList) blobList[b.SessionID] = b; }
+    public void updateTuioBlob(TuioBlob b) { lock (blobList) blobList[b.SessionID] = b; }
+    public void removeTuioBlob(TuioBlob b) { lock (blobList) blobList.Remove(b.SessionID); }
     public void refresh(TuioTime t) { Invalidate(); }
 
     // =========================================================
     //  Paint Dispatch
     // =========================================================
-    protected override void OnPaintBackground(PaintEventArgs e)
+    protected override void OnPaint(PaintEventArgs e)
     {
         if (width <= 0 || height <= 0) return;
-        
+
         Graphics g = e.Graphics;
-        g.SmoothingMode      = SmoothingMode.AntiAlias;
-        g.InterpolationMode  = InterpolationMode.HighQualityBicubic;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
         try
         {
-            switch (state)
+            if (state == AppState.TeacherPanel)
             {
-                case AppState.SignIn:         DrawSignIn(g);         break;
-                case AppState.SignUp:         DrawSignUp(g);         break;
-                case AppState.StorySelection: DrawStorySelection(g); break;
-                case AppState.StoryPlayer:    DrawStoryPlayer(g);    break;
-                case AppState.StoryBuilder:   DrawStoryBuilder(g);   break;
+                DrawTeacherDashboard(g);
+                DrawTuioObjects(g);
+            }
+            else
+            {
+                switch (state)
+                {
+                    case AppState.SignIn: DrawSignIn(g); break;
+                    case AppState.SignUp: DrawSignUp(g); break;
+                    case AppState.StorySelection: DrawStorySelection(g); break;
+                    case AppState.StoryPlayer: DrawStoryPlayer(g); break;
+                    case AppState.StoryBuilder: DrawStoryBuilder(g); break;
+                }
+
+                DrawTuioObjects(g);
+                DrawSkeletonAndMenu(g);
+                DrawHeatmapOverlay(g);
+                DrawAdaptiveMenu(g);
             }
 
-            DrawTuioObjects(g);
-            DrawSkeletonAndMenu(g);
-            DrawHeatmapOverlay(g);  // Draw gaze heatmap overlay if enabled
-            DrawAdaptiveMenu(g);   // Draw adaptive gaze-driven menu
         }
         catch (Exception ex)
         {
             g.Clear(Color.DarkRed);
             g.DrawString("UI Crash Prevented:\n" + ex.ToString(), new Font("Consolas", 14f), Brushes.White, 50, 50);
         }
+
+        base.OnPaint(e); // Draw child controls (TeacherPanel) on top
     }
 
     private void DrawSkeletonAndMenu(Graphics g)
@@ -1883,7 +2122,7 @@ public class TuioDemo : Form, TuioListener
                     int jy = (int)(kvp.Value[1] * height);
                     using (SolidBrush jb = new SolidBrush(Color.Gold))
                         g.FillEllipse(jb, jx - 6, jy - 6, 12, 12);
-                    
+
                     if (kvp.Key == "rw") // Highlight right wrist (primary interaction)
                     {
                         using (SolidBrush jbr = new SolidBrush(Color.Red))
@@ -1903,7 +2142,7 @@ public class TuioDemo : Form, TuioListener
         {
             int cx = width / 2;
             int cy = height / 2;
-            int r = (int)(0.15f * width); 
+            int r = (int)(0.15f * width);
             // Draw background circle
             using (SolidBrush mb = new SolidBrush(Color.FromArgb(160, 20, 20, 40)))
                 g.FillEllipse(mb, cx - r - 40, cy - r - 40, (r + 40) * 2, (r + 40) * 2);
@@ -1914,20 +2153,36 @@ public class TuioDemo : Form, TuioListener
             int n_outer = Math.Min(4, StoryDatabase.AllStories.Length);
             for (int i = 0; i <= n_outer; i++) // 4 outer slices + 1 center (i=n_outer)
             {
-                bool isHover = (i == circMenuHover);
-                
+                bool isHover = false;
+                // Update Hover from TUIO Pointer
+                if (mk33Present)
+                {
+                    double angle = Math.Atan2(mk33Y * height - cy, mk33X * width - cx) * 180 / Math.PI + 90;
+                    if (angle < 0) angle += 360;
+
+                    double dist = Math.Sqrt(Math.Pow(mk33X * width - cx, 2) + Math.Pow(mk33Y * height - cy, 2));
+                    if (dist < 60) isHover = (i == n_outer); // Center
+                    else if (dist < r + 40)
+                    {
+                        int sliceIdx = (int)(angle / (360f / n_outer));
+                        isHover = (i == sliceIdx);
+                    }
+                }
+
+                if (isHover) circMenuHover = i;
+
                 if (i < n_outer)
                 {
                     // Outer arc slices
                     float startAngle = i * (360f / n_outer) - 90f;
                     float sweepAngle = 360f / n_outer;
-                    
+
                     Rectangle sliceRect = new Rectangle(cx - r - 20, cy - r - 20, (r + 20) * 2, (r + 20) * 2);
-                    
+
                     using (GraphicsPath path = new GraphicsPath())
                     {
                         path.AddPie(sliceRect, startAngle + 1f, sweepAngle - 2f);
-                        
+
                         System.Drawing.Drawing2D.GraphicsState gState = g.Save();
                         g.SetClip(path);
 
@@ -1947,19 +2202,19 @@ public class TuioDemo : Form, TuioListener
                             using (SolidBrush fallBr = new SolidBrush(StoryDatabase.AllStories[i].CardColor))
                                 g.FillPath(fallBr, path);
                         }
-                        
+
                         g.Restore(gState);
-                        
+
                         // Outline
-                        using (Pen sp = new Pen(isHover ? Color.White : Color.FromArgb(100,255,255,255), isHover ? 4f : 2f))
+                        using (Pen sp = new Pen(isHover ? Color.White : Color.FromArgb(100, 255, 255, 255), isHover ? 4f : 2f))
                             g.DrawPath(sp, path);
                     }
-                    
+
                     // Draw story title
                     double midAngle = (startAngle + sweepAngle / 2f) * Math.PI / 180.0;
                     int tx = (int)(cx + (r - 20) * Math.Cos(midAngle));
                     int ty = (int)(cy + (r - 20) * Math.Sin(midAngle));
-                    
+
                     using (Font mf = new Font("Comic Sans MS", 14f, FontStyle.Bold))
                     {
                         StringFormat msf = new StringFormat(); msf.Alignment = StringAlignment.Center; msf.LineAlignment = StringAlignment.Center;
@@ -1973,10 +2228,10 @@ public class TuioDemo : Form, TuioListener
                     Rectangle centerRect = new Rectangle(cx - cr, cy - cr, cr * 2, cr * 2);
                     using (SolidBrush cBr = new SolidBrush(Color.FromArgb(240, 20, 20, 30)))
                         g.FillEllipse(cBr, centerRect);
-                        
+
                     using (Pen cp = new Pen(isHover ? Color.White : Color.DarkGray, isHover ? 4f : 2f))
                         g.DrawEllipse(cp, centerRect);
-                        
+
                     using (Font mf = new Font("Comic Sans MS", 12f, FontStyle.Bold))
                     {
                         StringFormat msf = new StringFormat(); msf.Alignment = StringAlignment.Center; msf.LineAlignment = StringAlignment.Center;
@@ -1999,7 +2254,7 @@ public class TuioDemo : Form, TuioListener
         {
             int gazeScreenX = (int)(gazeX * width);
             int gazeScreenY = (int)(gazeY * height);
-            
+
             // Draw outer ring
             using (Pen gazePen = new Pen(isBlinking ? Color.Red : Color.Cyan, 3f))
             {
@@ -2011,7 +2266,7 @@ public class TuioDemo : Form, TuioListener
             {
                 g.FillEllipse(gazeBrush, gazeScreenX - 5, gazeScreenY - 5, 10, 10);
             }
-            
+
             // Draw gaze status text
             string gazeStatus = isBlinking ? "BLINK" : "GAZE";
             using (Font gazeFont = new Font("Segoe UI", 8f, FontStyle.Bold))
@@ -2020,7 +2275,7 @@ public class TuioDemo : Form, TuioListener
                 g.DrawString(gazeStatus, gazeFont, gazeTextBrush, gazeScreenX + 25, gazeScreenY - 10);
             }
         }
-        
+
         // 5. Draw heatmap toggle hint (TUIO markers)
         if ((DateTime.Now - lastGestureTime).TotalSeconds < 5 || heatmapVisible)
         {
@@ -2045,7 +2300,7 @@ public class TuioDemo : Form, TuioListener
         int px = (width - pw) / 2, py = (height - ph) / 2;
         DrawGlassPanel(g, px, py, pw, ph, Color.FromArgb(160, 10, 30, 80));
 
-        DrawCentredText(g, fntHuge,  brGold,  "✨ Magic Story Builder ✨", py + 22);
+        DrawCentredText(g, fntHuge, brGold, "✨ Magic Story Builder ✨", py + 22);
         DrawCentredText(g, fntTitle, brWhite, "A Fun Adventure for Kids!", py + 82);
 
         using (Pen pLine = new Pen(Color.FromArgb(255, 215, 0), 3f))
@@ -2055,14 +2310,14 @@ public class TuioDemo : Form, TuioListener
         int boxW = (pw - 100) / 2;   // width of each option box
         int boxH = 230;
         int boxY = py + 150;
-        int guestX  = px + 30;
+        int guestX = px + 30;
         int personalX = px + 50 + boxW;
 
         // Guest box
         bool guestActive = signInMarkerPresent && signInMarkerId == 10;
-        Color guestFill  = guestActive
+        Color guestFill = guestActive
             ? Color.FromArgb(100, 30, 60, 130)
-            : Color.FromArgb(50,  20, 20, 80);
+            : Color.FromArgb(50, 20, 20, 80);
         DrawGlassPanel(g, guestX, boxY, boxW, boxH, guestFill);
         if (guestActive)
         {
@@ -2070,21 +2325,21 @@ public class TuioDemo : Form, TuioListener
                 g.DrawRectangle(hp, guestX, boxY, boxW, boxH);
         }
         using (Pen gp = new Pen(Color.FromArgb(100, 150, 150, 255), 3f))
-            g.DrawEllipse(gp, guestX + boxW/2 - 30, boxY + 24, 60, 60);
+            g.DrawEllipse(gp, guestX + boxW / 2 - 30, boxY + 24, 60, 60);
         g.DrawString("10", fntTitle, brWhite,
-            guestX + boxW/2 - 14, boxY + 40);
-        DrawStringCentredIn(g, fntBody,  brGold,  "PLAY AS GUEST 🎈",   guestX, boxY + 100, boxW);
-        DrawStringCentredIn(g, fntSmall, brWhite, "Place Marker 10",    guestX, boxY + 138, boxW);
-        DrawStringCentredIn(g, fntSmall, new SolidBrush(Color.FromArgb(180,180,255)),
+            guestX + boxW / 2 - 14, boxY + 40);
+        DrawStringCentredIn(g, fntBody, brGold, "PLAY AS GUEST 🎈", guestX, boxY + 100, boxW);
+        DrawStringCentredIn(g, fntSmall, brWhite, "Place Marker 10", guestX, boxY + 138, boxW);
+        DrawStringCentredIn(g, fntSmall, new SolidBrush(Color.FromArgb(180, 180, 255)),
             "Place + rotate 45°", guestX, boxY + 168, boxW);
 
         // Personal-account box
         int userCount = db.GetAllUsers().Count;
-        bool anyUsers    = userCount > 0;
-        bool userActive  = signInMarkerPresent && signInMarkerId != 10;
-        Color userFill   = userActive
+        bool anyUsers = userCount > 0;
+        bool userActive = signInMarkerPresent && signInMarkerId != 10;
+        Color userFill = userActive
             ? Color.FromArgb(100, 20, 80, 40)
-            : Color.FromArgb(50,  10, 40, 20);
+            : Color.FromArgb(50, 10, 40, 20);
         DrawGlassPanel(g, personalX, boxY, boxW, boxH, userFill);
         if (userActive)
         {
@@ -2092,12 +2347,12 @@ public class TuioDemo : Form, TuioListener
                 g.DrawRectangle(hp, personalX, boxY, boxW, boxH);
         }
         using (Pen up = new Pen(Color.FromArgb(100, 100, 220, 120), 3f))
-            g.DrawEllipse(up, personalX + boxW/2 - 30, boxY + 24, 60, 60);
+            g.DrawEllipse(up, personalX + boxW / 2 - 30, boxY + 24, 60, 60);
         string idLabel = userActive ? signInMarkerId.ToString() : "ID";
         g.DrawString(idLabel, fntTitle, userActive ? brGold : brWhite,
-            personalX + boxW/2 - (idLabel.Length > 1 ? 18 : 10), boxY + 40);
-        DrawStringCentredIn(g, fntBody,  brGold,  "MY PROFILE 🌟",         personalX, boxY + 100, boxW);
-        DrawStringCentredIn(g, fntSmall, brWhite, "Your Magic ID Marker",  personalX, boxY + 138, boxW);
+            personalX + boxW / 2 - (idLabel.Length > 1 ? 18 : 10), boxY + 40);
+        DrawStringCentredIn(g, fntBody, brGold, "MY PROFILE 🌟", personalX, boxY + 100, boxW);
+        DrawStringCentredIn(g, fntSmall, brWhite, "Your Magic ID Marker", personalX, boxY + 138, boxW);
         DrawStringCentredIn(g, fntSmall, new SolidBrush(anyUsers
             ? Color.FromArgb(180, 255, 200, 100)
             : Color.FromArgb(130, 180, 180, 180)),
@@ -2124,7 +2379,7 @@ public class TuioDemo : Form, TuioListener
                 using (Pen pArc = new Pen(Color.FromArgb(255, 215, 0), 6f))
                 {
                     pArc.StartCap = LineCap.Round;
-                    pArc.EndCap   = LineCap.Round;
+                    pArc.EndCap = LineCap.Round;
                     g.DrawArc(pArc, rx - rr, ry - rr, rr * 2, rr * 2, -90f, arc);
                 }
             }
@@ -2192,17 +2447,17 @@ public class TuioDemo : Form, TuioListener
         {
             int col = i % cols;
             int row = i / cols;
-            int cx  = px + 40 + col * cellW;
-            int cy  = gridTop + row * cellH;
+            int cx = px + 40 + col * cellW;
+            int cy = gridTop + row * cellH;
 
             bool onTable = suMarkersOnTable.Contains(i);
-            bool isConfirm   = (i == CONFIRM_MARKER);
+            bool isConfirm = (i == CONFIRM_MARKER);
             bool isBackspace = (i == BACKSPACE_MARKER);
 
             Color cellCol;
-            if (isConfirm)   cellCol = Color.FromArgb(onTable ? 180 : 80, 50, 200, 80);
+            if (isConfirm) cellCol = Color.FromArgb(onTable ? 180 : 80, 50, 200, 80);
             else if (isBackspace) cellCol = Color.FromArgb(onTable ? 180 : 80, 200, 100, 50);
-            else             cellCol = Color.FromArgb(onTable ? 160 : 50, 50, 100, 180);
+            else cellCol = Color.FromArgb(onTable ? 160 : 50, 50, 100, 180);
 
             using (SolidBrush cb = new SolidBrush(cellCol))
                 g.FillRectangle(cb, cx + 2, cy + 2, cellW - 4, cellH - 4);
@@ -2214,47 +2469,47 @@ public class TuioDemo : Form, TuioListener
                     g.DrawRectangle(hp, cx + 2, cy + 2, cellW - 4, cellH - 4);
             }
 
-            string idStr  = i.ToString();
+            string idStr = i.ToString();
             string lblStr;
-            if (isConfirm)        lblStr = "✓ DONE";
+            if (isConfirm) lblStr = "✓ DONE";
             else if (isBackspace) lblStr = "← DEL";
-            else                  lblStr = ((char)('A' + i)).ToString();
+            else lblStr = ((char)('A' + i)).ToString();
 
-            g.DrawString(idStr,  fntSmall, new SolidBrush(Color.FromArgb(200, 200, 200, 200)), cx + 4,  cy + 3);
-            g.DrawString(lblStr, fntBody,   onTable ? brGold : brWhite, cx + 18, cy + 14);
+            g.DrawString(idStr, fntSmall, new SolidBrush(Color.FromArgb(200, 200, 200, 200)), cx + 4, cy + 3);
+            g.DrawString(lblStr, fntBody, onTable ? brGold : brWhite, cx + 18, cy + 14);
         }
 
         // ---- Bluetooth Selection (on the right) ----
         int btx = px + 680, bty = py + 120, btw = 320, bth = 330;
         DrawGlassPanel(g, btx, bty, btw, bth, Color.FromArgb(60, 0, 0, 0));
         g.DrawString("Nearby Bluetooth Devices:", fntSmall, brGold, btx + 10, bty + 10);
-        
+
         for (int j = 0; j < Math.Min(6, discoveredBtDevices.Count); j++)
         {
             int rowY = bty + 40 + j * 44;
             bool hovering = (j == btHoverIndex);
             bool selected = (discoveredBtDevices[j][1] == selectedBtAddr);
-            
-            Color rowCol = selected ? Color.FromArgb(120, 255, 215, 0) : 
-                           hovering ? Color.FromArgb(80, 100, 100, 100) : 
+
+            Color rowCol = selected ? Color.FromArgb(120, 255, 215, 0) :
+                           hovering ? Color.FromArgb(80, 100, 100, 100) :
                            Color.FromArgb(40, 50, 50, 50);
-                           
+
             using (SolidBrush rb = new SolidBrush(rowCol))
                 g.FillRectangle(rb, btx + 10, rowY, btw - 20, 38);
-                
+
             g.DrawString(discoveredBtDevices[j][0], fntSmall, brWhite, btx + 18, rowY + 4);
             g.DrawString(discoveredBtDevices[j][1], fntSmall, Color.FromArgb(150, 200, 200, 255).ToSolidBrush(), btx + 18, rowY + 20);
         }
-        
+
         g.DrawString("Selected: " + selectedBtName, fntSmall, brGold, btx + 10, bty + bth - 30);
 
         // ---- Confirm-hold progress bar ----
         if (suConfirmSessionId != -1 && suName.Length > 0)
         {
-            double held    = (DateTime.Now - suConfirmPlacedAt).TotalMilliseconds;
-            float  holdPct = Math.Min((float)(held / CONFIRM_HOLD_MS), 1f);
-            int    barY    = py + ph - 110;
-            int    barW    = pw - 80;
+            double held = (DateTime.Now - suConfirmPlacedAt).TotalMilliseconds;
+            float holdPct = Math.Min((float)(held / CONFIRM_HOLD_MS), 1f);
+            int barY = py + ph - 110;
+            int barW = pw - 80;
 
             DrawCentredText(g, fntBody, brWhite, "Hold marker 25 to confirm…", barY - 22);
 
@@ -2322,15 +2577,228 @@ public class TuioDemo : Form, TuioListener
         using (Pen ibP = new Pen(Color.FromArgb(255, 215, 0), 2.5f))
             g.DrawRectangle(ibP, ibx, iby, ibw, ibh);
 
-        DrawCentredText(g, fntBody, brWhite, "Your TUIO Login ID  (remember this!)", iby + 8);
-        DrawCentredText(g, fntHuge, brGold,  suAssignedId.ToString(), iby + 34);
+        DrawCentredText(g, fntHuge, brGold, suAssignedId.ToString(), iby + 34);
+    }
 
-        DrawCentredText(g, fntSmall,
-            new SolidBrush(Color.FromArgb(200, 180, 255, 180)),
-            "Use your ID marker to sign in next time.", py + ph - 68);
-        DrawCentredText(g, fntSmall,
-            new SolidBrush(Color.FromArgb(160, 180, 180, 255)),
-            "Marker 34 = Return to Sign In", py + ph - 38);
+    // =========================================================
+    //  TEACHER DASHBOARD — fully custom-drawn, 100% TUIO
+    // =========================================================
+    private void DrawTeacherDashboard(Graphics g)
+    {
+        // Background
+        DrawAnimatedBg(g, Color.FromArgb(20, 20, 35), Color.FromArgb(35, 25, 55));
+
+        // ── Title Bar ──
+        DrawGlassPanel(g, 0, 0, width, 60, Color.FromArgb(180, 10, 10, 30));
+        g.DrawString("📋  TEACHER MANAGEMENT DASHBOARD", fntTitle, brGold, 20, 16);
+        string teacherLbl = loggedInUser != null ? "Logged in: " + loggedInUser : "Teacher Mode";
+        using (var brDim = new SolidBrush(Color.FromArgb(160, 200, 200, 200)))
+            g.DrawString(teacherLbl, fntSmall, brDim, width - 300, 22);
+
+        // ── Tab Bar ──
+        string[] tabNames = { "👥 Students", "📊 Attendance", "📈 Statistics" };
+        int tabW = 180, tabH = 36, tabY = 68;
+        for (int t = 0; t < 3; t++)
+        {
+            int tx = 20 + t * (tabW + 10);
+            bool active = (int)tpActiveTab == t;
+            bool hovered = (tpHoveredTab == t);
+            Color tabCol = active ? Color.FromArgb(200, 0, 120, 200) : hovered ? Color.FromArgb(150, 0, 80, 140) : Color.FromArgb(120, 40, 40, 60);
+            DrawGlassPanel(g, tx, tabY, tabW, tabH, tabCol);
+            using (var tbr = new SolidBrush(active ? Color.White : Color.FromArgb(200, 200, 200)))
+                g.DrawString(tabNames[t] + "  [Mkr " + (t + 1) + "]", fntSmall, tbr, tx + 10, tabY + 9);
+        }
+
+        int contentY = 114;
+        int contentH = height - contentY - 10;
+
+        if (tpActiveTab == TpTab.Students)
+            DrawTpStudentsTab(g, contentY, contentH);
+        else if (tpActiveTab == TpTab.Attendance)
+            DrawTpAttendanceTab(g, contentY, contentH);
+        else
+            DrawTpStatsTab(g, contentY, contentH);
+
+        // ── Status Bar ──
+        if (tpStatus.Length > 0)
+        {
+            double age = (DateTime.Now - tpStatusTime).TotalSeconds;
+            if (age < 5)
+            {
+                int alpha = (int)(255 * Math.Max(0, 1 - age / 5));
+                using (var sbr = new SolidBrush(Color.FromArgb(alpha, 255, 220, 80)))
+                    DrawCentredText(g, fntBody, sbr, tpStatus, height - 40);
+            }
+        }
+
+        // ── TUIO Pointer ──
+        if (mk33Present)
+        {
+            int px = (int)(mk33X * width), py = (int)(mk33Y * height);
+            using (var glow = new SolidBrush(Color.FromArgb(60, 0, 200, 255)))
+                g.FillEllipse(glow, px - 20, py - 20, 40, 40);
+            using (var dot = new SolidBrush(Color.FromArgb(220, 0, 220, 255)))
+                g.FillEllipse(dot, px - 8, py - 8, 16, 16);
+            using (var ring = new Pen(Color.Cyan, 2f))
+                g.DrawEllipse(ring, px - 12, py - 12, 24, 24);
+        }
+    }
+
+    private void DrawTpStudentsTab(Graphics g, int contentY, int contentH)
+    {
+        int listX = 15, listW = width / 2 - 20;
+        int detailX = width / 2 + 5, detailW = width / 2 - 20;
+        int rowH = 32;
+
+        // ── Student List ──
+        DrawGlassPanel(g, listX, contentY, listW, contentH, Color.FromArgb(140, 15, 15, 30));
+
+        // Header
+        g.DrawString("  #    Mkr   Name                     Role        Created", fntMono, brGold, listX + 5, contentY + 5);
+        using (var hline = new Pen(Color.FromArgb(100, 255, 215, 0)))
+            g.DrawLine(hline, listX + 5, contentY + 24, listX + listW - 5, contentY + 24);
+
+        int startRow = tpScrollOffset;
+        int endRow = Math.Min(tpStudents.Count, startRow + TP_MAX_VISIBLE_ROWS);
+        for (int i = startRow; i < endRow; i++)
+        {
+            int ry = contentY + 28 + (i - startRow) * rowH;
+            var u = tpStudents[i];
+
+            // Highlight
+            if (i == tpSelectedRow)
+                DrawGlassPanel(g, listX + 2, ry, listW - 4, rowH - 2, Color.FromArgb(150, 0, 100, 180));
+            else if (i == tpHoveredRow)
+                DrawGlassPanel(g, listX + 2, ry, listW - 4, rowH - 2, Color.FromArgb(100, 0, 60, 120));
+
+            Brush rowBr = (i == tpSelectedRow) ? brGold : brWhite;
+            string line = string.Format("  {0,-4} {1,-5} {2,-24} {3,-10} {4}",
+                i + 1, u.TuioId, u.Name.Length > 22 ? u.Name.Substring(0, 22) : u.Name,
+                u.Role, u.CreatedAt.ToString("yyyy-MM-dd"));
+            g.DrawString(line, fntMono, rowBr, listX + 5, ry + 6);
+        }
+
+        // Scroll hints
+        if (tpScrollOffset > 0)
+            g.DrawString("▲ Mkr 10 = Scroll Up", fntSmall, brGold, listX + 10, contentY + contentH - 40);
+        if (endRow < tpStudents.Count)
+            g.DrawString("▼ Mkr 11 = Scroll Down", fntSmall, brGold, listX + listW - 200, contentY + contentH - 40);
+
+        g.DrawString("Total: " + tpStudents.Count + " users", fntSmall, brWhite, listX + 10, contentY + contentH - 22);
+
+        // ── Detail / Input Panel ──
+        DrawGlassPanel(g, detailX, contentY, detailW, contentH / 2, Color.FromArgb(140, 20, 20, 40));
+        g.DrawString("Student Details", fntTitle, brGold, detailX + 15, contentY + 10);
+
+        int dy = contentY + 50;
+        g.DrawString("Name:", fntBody, brWhite, detailX + 15, dy);
+        // Name input box
+        int inputX = detailX + 100, inputW = detailW - 130;
+        using (var inputBg = new SolidBrush(Color.FromArgb(180, 30, 30, 50)))
+            g.FillRectangle(inputBg, inputX, dy - 2, inputW, 28);
+        using (var inputBorder = new Pen(Color.FromArgb(180, 0, 150, 255), 1.5f))
+            g.DrawRectangle(inputBorder, inputX, dy - 2, inputW, 28);
+        string displayName = tpNameInput.Length > 0 ? tpNameInput + "▌" : "Place markers 0-23 (A-X)...";
+        Brush nameBr = tpNameInput.Length > 0 ? brWhite : new SolidBrush(Color.Gray);
+        g.DrawString(displayName, fntBody, nameBr, inputX + 5, dy + 2);
+
+        dy += 40;
+        g.DrawString("Role:", fntBody, brWhite, detailX + 15, dy);
+        string roleDisplay = "[ " + tpRoles[tpRoleIndex] + " ]   Mkr 9 = Toggle";
+        using (var roleBr = new SolidBrush(tpRoleIndex == 1 ? Color.FromArgb(255, 180, 80) : Color.FromArgb(80, 200, 255)))
+            g.DrawString(roleDisplay, fntBody, roleBr, inputX, dy);
+
+        // ── Action Buttons ──
+        dy += 50;
+        string[] btnLabels = { "➕ ADD [Mkr 5]", "✏️ UPDATE [Mkr 6]", "🗑️ DELETE [Mkr 7]", "↺ CLEAR [Mkr 8]" };
+        Color[] btnColors = { Color.FromArgb(0, 140, 0), Color.FromArgb(0, 100, 180), Color.FromArgb(180, 0, 0), Color.FromArgb(100, 100, 100) };
+        int btnW = (detailW - 50) / 2, btnH = 38;
+        for (int b = 0; b < 4; b++)
+        {
+            int bx = detailX + 15 + (b % 2) * (btnW + 10);
+            int by = dy + (b / 2) * (btnH + 8);
+            bool hov = (tpHoveredButton == b);
+            Color bc = hov ? Color.FromArgb(Math.Min(255, btnColors[b].R + 60), Math.Min(255, btnColors[b].G + 60), Math.Min(255, btnColors[b].B + 60)) : btnColors[b];
+            DrawGlassPanel(g, bx, by, btnW, btnH, Color.FromArgb(200, bc.R, bc.G, bc.B));
+            g.DrawString(btnLabels[b], fntSmall, brWhite, bx + 8, by + 10);
+        }
+
+        // ── Control Legend ──
+        int legendY = contentY + contentH / 2 + 10;
+        int legendH = contentH / 2 - 15;
+        DrawGlassPanel(g, detailX, legendY, detailW, legendH, Color.FromArgb(140, 25, 25, 50));
+        g.DrawString("TUIO CONTROL LEGEND", fntBody, new SolidBrush(Color.Cyan), detailX + 15, legendY + 8);
+
+        string[] legendLines = {
+            "Mkr 33 (move)  → Pointer / Hover rows",
+            "Mkr 33 (rotate 45°) → Select hovered row",
+            "Mkr 25 (place) → Select hovered row",
+            "Mkr 0-4, 12-23 → Type letters A-E, M-X",
+            "Mkr 24 → Backspace",
+            "Mkr 9  → Toggle Role (Student/Teacher)",
+            "Mkr 5  → ADD   |  Mkr 6  → UPDATE",
+            "Mkr 7  → DELETE | Mkr 8  → CLEAR",
+            "Mkr 10 → Scroll ▲ | Mkr 11 → Scroll ▼",
+            "Mkr 1/2/3 → Switch Tab",
+            "Mkr 34 → Logout / Back"
+        };
+        for (int l = 0; l < legendLines.Length; l++)
+        {
+            using (var lbr = new SolidBrush(Color.FromArgb(200, 180, 180, 200)))
+                g.DrawString(legendLines[l], fntSmall, lbr, detailX + 15, legendY + 34 + l * 20);
+        }
+    }
+
+    private void DrawTpAttendanceTab(Graphics g, int contentY, int contentH)
+    {
+        DrawGlassPanel(g, 15, contentY, width - 30, contentH, Color.FromArgb(140, 15, 15, 30));
+        g.DrawString("  #    User                  Login               Logout              Duration    Scenes  Challenges", fntMono, brGold, 25, contentY + 8);
+        using (var hline = new Pen(Color.FromArgb(100, 255, 215, 0)))
+            g.DrawLine(hline, 25, contentY + 28, width - 35, contentY + 28);
+
+        int rowH = 26;
+        int maxRows = (contentH - 60) / rowH;
+        int end = Math.Min(tpAttendance.Count, maxRows);
+        for (int i = 0; i < end; i++)
+        {
+            int ry = contentY + 32 + i * rowH;
+            var r = tpAttendance[i];
+            string dur = r.LogoutTime.HasValue ? ((r.LogoutTime.Value - r.LoginTime).Hours + "h " + (r.LogoutTime.Value - r.LoginTime).Minutes + "m") : "Active";
+            string line = string.Format("  {0,-4} {1,-20} {2,-18} {3,-18} {4,-10} {5,-7} {6}",
+                r.Id, r.UserName?.Length > 18 ? r.UserName.Substring(0, 18) : r.UserName ?? "-",
+                r.LoginTime.ToString("MM-dd HH:mm"), r.LogoutTime?.ToString("MM-dd HH:mm") ?? "---",
+                dur, r.ScenesCompleted, r.ChallengesCompleted);
+            g.DrawString(line, fntMono, brWhite, 25, ry);
+        }
+        g.DrawString("Total Sessions: " + tpAttendance.Count, fntBody, brGold, 25, contentY + contentH - 30);
+    }
+
+    private void DrawTpStatsTab(Graphics g, int contentY, int contentH)
+    {
+        DrawGlassPanel(g, 15, contentY, width - 30, contentH, Color.FromArgb(140, 15, 15, 30));
+        g.DrawString("System Statistics", fntTitle, brGold, 30, contentY + 15);
+
+        if (db == null) return;
+        var stats = db.GetStatistics();
+        string[] labels = { "Total Active Users", "Total Students", "Total Teachers", "Total Sessions", "Total Gaze Points", "Today's Sessions", "Active Users Today" };
+        string[] keys = { "TotalUsers", "TotalStudents", "TotalTeachers", "TotalSessions", "TotalGazePoints", "TodaySessions", "ActiveUsersToday" };
+        Color[] barColors = { Color.FromArgb(0, 180, 255), Color.FromArgb(0, 200, 100), Color.FromArgb(255, 180, 0), Color.FromArgb(100, 100, 255), Color.FromArgb(255, 100, 100), Color.FromArgb(0, 255, 200), Color.FromArgb(200, 100, 255) };
+
+        int sy = contentY + 60;
+        for (int i = 0; i < labels.Length && i < keys.Length; i++)
+        {
+            int val = 0;
+            if (stats.ContainsKey(keys[i])) int.TryParse(stats[keys[i]].ToString(), out val);
+            g.DrawString(labels[i] + ":", fntBody, brWhite, 40, sy);
+            // Value bar
+            int barW = Math.Min(val * 8, width / 2);
+            using (var bbr = new SolidBrush(Color.FromArgb(160, barColors[i].R, barColors[i].G, barColors[i].B)))
+                g.FillRectangle(bbr, 300, sy + 2, barW, 20);
+            g.DrawString(val.ToString(), fntBody, brGold, 310 + barW, sy);
+            sy += 36;
+        }
+
+        g.DrawString("Mkr 8 = Refresh Data", fntSmall, new SolidBrush(Color.Gray), 40, contentY + contentH - 30);
     }
 
     // =========================================================
@@ -2900,7 +3368,7 @@ public class TuioDemo : Form, TuioListener
         for (int i = 0; i < SCENES.Length; i++)
         {
             bool active = (i == si);
-            Brush scBr  = active ? brGold : brWhite;
+            Brush scBr = active ? brGold : brWhite;
             string prefix = active ? "> " : "  ";
             g.DrawString(prefix + SCENES[i], fntSmall, scBr, width - 216, 110 + i * 44);
             if (active)
@@ -2963,7 +3431,7 @@ public class TuioDemo : Form, TuioListener
                 if (sy >= rowY && sy <= rowY + 34)
                 {
                     mk33HoverScene = i;
-                    sceneIndex     = i;   // immediately select the scene
+                    sceneIndex = i;   // immediately select the scene
                     break;
                 }
             }
@@ -3000,7 +3468,7 @@ public class TuioDemo : Form, TuioListener
         if (mk33HoverScene >= 0)
         {
             string tip = "Select: " + SCENES[mk33HoverScene];
-            SizeF  tsz = g.MeasureString(tip, fntSmall);
+            SizeF tsz = g.MeasureString(tip, fntSmall);
             int tx = cx + 14, ty = cy - 18;
             // keep tooltip on screen
             if (tx + tsz.Width > width - 10) tx = cx - (int)tsz.Width - 14;
@@ -3014,7 +3482,7 @@ public class TuioDemo : Form, TuioListener
         {
             // dim hint when not over a scene row
             string tip = "Mkr 33";
-            SizeF  tsz = g.MeasureString(tip, fntSmall);
+            SizeF tsz = g.MeasureString(tip, fntSmall);
             g.DrawString(tip, fntSmall,
                 new SolidBrush(Color.FromArgb(140, 200, 200, 200)), cx + 14, cy - 8);
         }
@@ -3031,8 +3499,8 @@ public class TuioDemo : Form, TuioListener
         Random rng = new Random(42);
         for (int i = 0; i < 40; i++)
         {
-            float x = (rng.Next(width)  + bgParallax * (0.2f + i * 0.01f)) % width;
-            float y = (rng.Next(height) + bgParallax * 0.1f * (i % 5))     % height;
+            float x = (rng.Next(width) + bgParallax * (0.2f + i * 0.01f)) % width;
+            float y = (rng.Next(height) + bgParallax * 0.1f * (i % 5)) % height;
             float r = 1.5f + (i % 3);
             using (SolidBrush pb = new SolidBrush(col))
                 g.FillEllipse(pb, x - r, y - r, r * 2, r * 2);
@@ -3114,7 +3582,7 @@ public class TuioDemo : Form, TuioListener
         GraphicsState gs = g.Save();
         g.TranslateTransform(x + size / 2f, y + size / 2f);
         g.RotateTransform(angleDeg);
-        
+
         if (frame != null)
         {
             g.DrawImage(frame, -size / 2, -size / 2, size, size);
@@ -3124,7 +3592,7 @@ public class TuioDemo : Form, TuioListener
             int idx = Array.IndexOf(ANIMALS, animal);
             string[] emojis = { "🦁", "🦊", "🦅", "🐺", "🐻", "🦄" };
             string emoji = (idx >= 0 && idx < emojis.Length) ? emojis[idx] : "❓";
-            
+
             using (Font ef = new Font("Segoe UI Emoji", size * 0.5f))
             {
                 SizeF es = g.MeasureString(emoji, ef);
@@ -3141,10 +3609,10 @@ public class TuioDemo : Form, TuioListener
             foreach (TuioObject obj in objectList.Values)
             {
                 if (obj.SymbolID > 3) continue;
-                int   ox = cx + (int)(obj.X * cw);
-                int   oy = cy + (int)(obj.Y * ch);
+                int ox = cx + (int)(obj.X * cw);
+                int oy = cy + (int)(obj.Y * ch);
                 float angleDeg = (float)(obj.Angle / Math.PI * 180.0);
-                int   sz = 110;
+                int sz = 110;
 
                 using (SolidBrush gb = new SolidBrush(Color.FromArgb(40, ANIMAL_COLORS[obj.SymbolID])))
                     g.FillEllipse(gb, ox - sz / 2 - 16, oy - sz / 2 - 16, sz + 32, sz + 32);
@@ -3154,7 +3622,7 @@ public class TuioDemo : Form, TuioListener
                 DrawAnimalAt(g, ANIMALS[obj.SymbolID], ox - sz / 2, oy - sz / 2, sz, animTick, angleDeg);
 
                 string tag = ANIMAL_NAMES[obj.SymbolID] + "  " + (int)angleDeg + " deg";
-                SizeF  ts  = g.MeasureString(tag, fntSmall);
+                SizeF ts = g.MeasureString(tag, fntSmall);
                 using (SolidBrush tagBg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
                     g.FillRectangle(tagBg,
                         (int)(ox - ts.Width / 2 - 6), oy + sz / 2 + 4,
@@ -3174,8 +3642,8 @@ public class TuioDemo : Form, TuioListener
         {
             foreach (TuioObject obj in objectList.Values)
             {
-                int   ox  = obj.getScreenX(width);
-                int   oy  = obj.getScreenY(height);
+                int ox = obj.getScreenX(width);
+                int oy = obj.getScreenY(height);
                 float ang = (float)(obj.Angle / Math.PI * 180.0);
                 if (obj.SymbolID < ANIMALS.Length)
                 {
@@ -3211,8 +3679,8 @@ public class TuioDemo : Form, TuioListener
     {
         string[] chars = { "The Brave Lion", "The Clever Fox", "The Swift Eagle", "The Wild Wolf" };
         string[] verbs = { "roamed", "explored", "soared above", "howled across" };
-        string name  = chars[Math.Min(markerId, 3)];
-        string verb  = verbs[Math.Min(markerId, 3)];
+        string name = chars[Math.Min(markerId, 3)];
+        string verb = verbs[Math.Min(markerId, 3)];
         string sname = SCENES[Math.Min(scene, SCENES.Length - 1)];
         return name + " " + verb + " " + sname + " in search of an ancient secret...";
     }
@@ -3220,6 +3688,88 @@ public class TuioDemo : Form, TuioListener
     // =========================================================
     //  Fullscreen toggle (now triggered by Marker 37)
     // =========================================================
+    private void HandleTuioClick(float x, float y)
+    {
+        if (state == AppState.StorySelection)
+        {
+            int cardW = 260, gap = 20;
+            int totalW = cardW * 4 + gap * 3;
+            int startX = (width - totalW) / 2;
+            int cardY = 140, cardH = 440;
+            int sx = (int)(x * width);
+            int sy = (int)(y * height);
+            if (sy >= cardY && sy <= cardY + cardH)
+            {
+                int relativeX = sx - startX;
+                if (relativeX >= 0)
+                {
+                    int idx = relativeX / (cardW + gap);
+                    if (idx >= 0 && idx < 4 && idx < StoryDatabase.AllStories.Length)
+                    {
+                        spStoryIndex = idx;
+                        spSceneIndex = 0;
+                        ResetSceneAnimation();
+                        state = AppState.StoryPlayer;
+                    }
+                }
+            }
+        }
+        else if (circMenuVisible && circMenuHover >= 0)
+        {
+            if (circMenuHover < 4) { spStoryIndex = circMenuHover; state = AppState.StoryPlayer; }
+            else state = AppState.StorySelection;
+            circMenuVisible = false;
+        }
+        Invalidate();
+    }
+
+    /// <summary>Updates tpHoveredRow based on mk33 pointer position over the custom-drawn student list.</summary>
+    private void UpdateTpPointer()
+    {
+        if (state != AppState.TeacherPanel) return;
+        int sx = (int)(mk33X * width), sy = (int)(mk33Y * height);
+
+        // Student list: left half of screen, starts at y=142 (contentY=114 + header 28)
+        int listX = 15, listW = width / 2 - 20;
+        int rowStartY = 142; // contentY(114) + header(28)
+        int rowH = 32;
+
+        tpHoveredRow = -1;
+        tpHoveredTab = -1;
+        tpHoveredButton = -1;
+
+        // Tab hover
+        int tabW = 180, tabH = 36, tabY = 68;
+        for (int t = 0; t < 3; t++)
+        {
+            int tx = 20 + t * (tabW + 10);
+            if (sx >= tx && sx <= tx + tabW && sy >= tabY && sy <= tabY + tabH)
+                tpHoveredTab = t;
+        }
+
+        // Row hover (only Students tab)
+        if (tpActiveTab == TpTab.Students && sx >= listX && sx <= listX + listW && sy >= rowStartY)
+        {
+            int relY = sy - rowStartY;
+            int rowIdx = tpScrollOffset + relY / rowH;
+            if (rowIdx >= 0 && rowIdx < tpStudents.Count)
+                tpHoveredRow = rowIdx;
+        }
+
+        // Button hover (right side)
+        int detailX = width / 2 + 5, detailW = width / 2 - 20;
+        int contentY = 114;
+        int btnBaseY = contentY + 140; // dy + 50
+        int btnW = (detailW - 50) / 2, btnH = 38;
+        for (int b = 0; b < 4; b++)
+        {
+            int bx = detailX + 15 + (b % 2) * (btnW + 10);
+            int by = btnBaseY + (b / 2) * (btnH + 8);
+            if (sx >= bx && sx <= bx + btnW && sy >= by && sy <= by + btnH)
+                tpHoveredButton = b;
+        }
+    }
+
     private void ToggleFullscreen()
     {
         if (!fullscreen)
@@ -3315,4 +3865,22 @@ public static class ColorExtensions
     }
 }
 
-
+// ============================================================
+//  Entry point (placed after TuioDemo so VS Designer can load)
+// ============================================================
+public static class Program
+{
+    [STAThread]
+    public static void Main(string[] argv)
+    {
+        int port = 3333;
+        if (argv.Length == 1)
+        {
+            int p;
+            if (int.TryParse(argv[0], out p) && p != 0) port = p;
+        }
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new TuioDemo(port));
+    }
+}
