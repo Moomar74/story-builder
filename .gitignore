@@ -8,3 +8,23 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Models and Tasks (Large files)
+*.task
+*.dat
+*.pt
+*.zip
+
+# Data and Logs
+*.log
+logs.txt
+heatmap_*.png
+storybuilder_local.json
+face_database.json
+
+# IDE and OS
+.vscode/
+**/.vs/
+.DS_Store
+Thumbs.db
+.python-version
