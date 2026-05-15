@@ -1,53 +1,13 @@
-"""
-Face Identification Scenario for AR
-====================================
-Identifies and recognizes faces in real-time for personalized AR experiences.
-Uses dlib for accurate face detection and identification.
-
-Features:
-  - Real-time face detection and recognition
-  - Face registration system (enroll new users)
-  - Persistent face database (JSON + encoded images)
-  - TCP server for AR client communication
-  - Threading for concurrent processing
-  - Confidence scoring for recognition accuracy
-
-Messages sent to client:
-  FACE_DETECTED:<face_id>:<name>:<confidence>  - Face recognized
-  FACE_REGISTERED:<face_id>:<name>            - New face enrolled
-  FACE_UNKNOWN:<session_id>                   - Unknown face detected
-  FACE_LEFT:<face_id>                         - Face no longer in frame
-
-Scenario Types:
-  - identification: Recognize registered users
-  - registration: Enroll new faces
-  - monitoring: Track face presence/attention
-
-Controls:
-  'r' - Register current face (enter name)
-  'd' - Delete registered face
-  's' - Save face database
-  'l' - List registered faces
-  'q' - Quit
-
-Benefits for AR:
-  1. Personalized content delivery based on user identity
-  2. Secure access control for sensitive AR scenarios
-  3. User attention tracking and engagement metrics
-  4. Multi-user scenario support (different content per user)
-  5. Attendance/logging for educational/training AR apps
-"""
-
 import cv2
 import numpy as np
 import os
 import socket
 import threading
 import time
+import struct
 from db_manager import db
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
-from collections import deque
 from datetime import datetime
 
 # dlib for face detection and recognition
@@ -56,814 +16,218 @@ try:
     DLIB_AVAILABLE = True
 except ImportError:
     DLIB_AVAILABLE = False
-    print("[!] dlib not found. Face Identification will run in detection-only fallback mode.")
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Configuration & Constants
-# ───────────────────────────────────────────────────────────────────────────────
+# --- Configuration ---
+BROADCASTER_IP = "127.0.0.1"
+BROADCASTER_PORT = 6000
+HUB_IP = "127.0.0.1"
+HUB_PORT = 6001
 
-TCP_PORT = 5003  # Separate port for face identifier
-CAMERA_INDEX = 0  # Default camera
+FACE_DETECTION_SCALE = 0.5
+FACE_RECOGNITION_TOLERANCE = 0.6
+FACE_LOSS_TIMEOUT = 2.0
 
-# Face detection settings
-FACE_DETECTION_SCALE = 0.5  # Scale down for faster processing (0.5 = half size)
-FACE_RECOGNITION_TOLERANCE = 0.6  # Lower = stricter matching (0.6 is typical)
-MIN_FACE_SIZE = 80  # Minimum face size in pixels
+# --- Hub Communication ---
+hub_conn = None
 
-# Database files
-FACE_DB_FILE = "face_database.json"
-FACE_IMAGES_DIR = "face_images"
+def connect_to_hub():
+    global hub_conn
+    while True:
+        try:
+            hub_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            hub_conn.connect((HUB_IP, HUB_PORT))
+            print("[+] Face Worker: Connected to Hub.")
+            break
+        except:
+            time.sleep(2)
 
-# Tracking settings
-FACE_LOSS_TIMEOUT = 2.0  # Seconds before considering face lost
-RECOGNITION_COOLDOWN = 1.0  # Seconds between recognition events
+def send_to_hub(msg):
+    if hub_conn:
+        try:
+            hub_conn.sendall((msg + "\n").encode('utf-8'))
+        except: pass
 
-# Model URLs for dlib
-PREDICTOR_URL = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-RECOGNITION_URL = "http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2"
+def hub_listener(engine):
+    """Listens for commands from the Hub (relayed from C#)."""
+    while True:
+        try:
+            data = hub_conn.recv(1024)
+            if not data: break
+            msg = data.decode('utf-8').strip()
+            if msg.startswith("REGISTER:"):
+                name = msg.split(":", 1)[1] if ":" in msg else "Unknown"
+                engine.start_registration(name)
+        except: break
 
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Data Classes
-# ───────────────────────────────────────────────────────────────────────────────
-
+# --- Data Classes & Engine (Simplified for Distributed) ---
 @dataclass
 class FaceIdentity:
-    """Represents a registered face identity."""
-    id: str
-    name: str
-    encoding: List[float]
-    created_at: str
-    last_seen: Optional[float] = None
-    recognition_count: int = 0
-    
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "encoding": self.encoding,
-            "created_at": self.created_at,
-            "last_seen": self.last_seen,
-            "recognition_count": self.recognition_count
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> 'FaceIdentity':
-        """Create from dictionary."""
-        return cls(
-            id=data["id"],
-            name=data["name"],
-            encoding=data["encoding"],
-            created_at=data["created_at"],
-            last_seen=data.get("last_seen"),
-            recognition_count=data.get("recognition_count", 0)
-        )
-
+    id: str; name: str; encoding: List[float]
 
 @dataclass
 class TrackedFace:
-    """Represents a face currently being tracked."""
-    session_id: str  # Temporary ID for this face session
-    rect: dlib.rectangle  # Face rectangle
-    encoding: Optional[List[float]] = None
-    identity: Optional[FaceIdentity] = None
-    confidence: float = 0.0
-    first_seen: float = field(default_factory=time.time)
-    last_seen: float = field(default_factory=time.time)
-    
-    @property
-    def center(self) -> Tuple[int, int]:
-        """Calculate center point of face."""
-        return ((self.rect.left() + self.rect.right()) // 2,
-                (self.rect.top() + self.rect.bottom()) // 2)
-    
-    @property
-    def is_recognized(self) -> bool:
-        """Check if face has been identified."""
-        return self.identity is not None
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# TCP Server for Client Communication
-# ───────────────────────────────────────────────────────────────────────────────
-
-connected_clients: List[socket.socket] = []
-
-
-def broadcast(message: str):
-    """Send message to all connected AR clients."""
-    if not message.endswith('\n'):
-        message += '\n'
-    msg_bytes = message.encode('utf-8')
-    for conn in list(connected_clients):
-        try:
-            conn.sendall(msg_bytes)
-        except Exception:
-            try:
-                connected_clients.remove(conn)
-            except ValueError:
-                pass
-
-
-def handle_client(conn: socket.socket, addr: Tuple[str, int]):
-    """Handle client connection."""
-    print(f"[+] Face ID client connected: {addr}")
-    connected_clients.append(conn)
-    try:
-        while True:
-            data = conn.recv(1024)
-            if not data:
-                break
-            msg = data.decode('utf-8').strip()
-            print(f"[<] From client: {msg}")
-            
-            # Handle client commands
-            if msg.startswith("REGISTER:"):
-                name = msg.split(":", 1)[1] if ":" in msg else "Unknown"
-                # Start registration automatically without terminal input
-                global engine
-                if 'engine' in globals():
-                    engine.start_registration(name)
-                broadcast(f"CMD_REGISTER_STARTING:{name}")
-    except Exception as e:
-        print(f"[!] Client error: {e}")
-    finally:
-        try:
-            connected_clients.remove(conn)
-        except ValueError:
-            pass
-        conn.close()
-        print(f"[-] Face ID client disconnected: {addr}")
-
-
-def start_tcp_server():
-    """Start TCP server for client communication."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", TCP_PORT))
-    server.listen(5)
-    print(f"[*] Face ID TCP Server on port {TCP_PORT}")
-    while True:
-        conn, addr = server.accept()
-        t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        t.start()
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Model Download Utility
-# ───────────────────────────────────────────────────────────────────────────────
-
-def download_dlib_models():
-    """Download dlib models if not present."""
-    predictor_path = "shape_predictor_68_face_landmarks.dat"
-    recognition_path = "dlib_face_recognition_resnet_model_v1.dat"
-    
-    # Check if models exist
-    if os.path.exists(predictor_path) and os.path.exists(recognition_path):
-        return predictor_path, recognition_path
-    
-    print("[*] dlib models not found. Please download manually:")
-    print(f"    1. {PREDICTOR_URL}")
-    print(f"    2. {RECOGNITION_URL}")
-    print("    Extract .bz2 files and place in this directory")
-    print("\n    Or use: pip install face-recognition-models")
-    
-    # Try alternative: check if face_recognition_models is available
-    try:
-        import face_recognition_models
-        predictor_path = face_recognition_models.pose_predictor_model_location()
-        recognition_path = face_recognition_models.face_recognition_model_location()
-        print("[+] Using face_recognition_models package")
-        return predictor_path, recognition_path
-    except ImportError:
-        pass
-    
-    return None, None
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Face Database Management
-# ───────────────────────────────────────────────────────────────────────────────
+    session_id: str; rect: any; encoding: Optional[List[float]] = None; identity: Optional[FaceIdentity] = None; last_seen: float = field(default_factory=time.time)
 
 class FaceDatabase:
-    """Manages professional face identity storage using DBManager."""
-    
     def __init__(self):
-        self.identities: Dict[str, FaceIdentity] = {}
-        self._load_database()
-    
-    def _load_database(self):
-        """Load face database from the professional database."""
+        self.identities = {}
+        self._load()
+    def _load(self):
         try:
-            users = db.get_all_users()
-            for user in users:
-                # Map DB fields to FaceIdentity
-                identity = FaceIdentity(
-                    id=user['id'],
-                    name=user['name'],
-                    encoding=user['face_encoding'],
-                    created_at=user['created_at'],
-                    last_seen=user.get('last_seen'),
-                    recognition_count=user.get('recognition_count', 0)
-                )
-                self.identities[identity.id] = identity
-            print(f"[*] Loaded {len(self.identities)} faces from professional database")
-        except Exception as e:
-            print(f"[!] Error loading database: {e}")
-    
-    def save(self):
-        """No-op as DBManager handles persistence."""
-        pass
-    
-    def register_face(self, name: str, encoding: List[float]) -> FaceIdentity:
-        """Register a new face in the professional database."""
-        try:
-            user_id = db.register_user(name, encoding)
-            identity = FaceIdentity(
-                id=user_id,
-                name=name,
-                encoding=encoding,
-                created_at=datetime.now().isoformat()
-            )
-            self.identities[user_id] = identity
-            
-            # Notify clients
-            broadcast(f"FACE_REGISTERED:{user_id}:{name}")
-            print(f"[+] Registered new face in DB: {name} (ID: {user_id})")
-            return identity
-        except Exception as e:
-            print(f"[!] Error registering face: {e}")
-            return None
-    
-    def delete_face(self, face_id: str) -> bool:
-        """Delete a registered face (Soft delete recommended in professional DBs)."""
-        # For now, just remove from local cache. 
-        # Real deletion would need a db.delete_user(face_id) method.
-        if face_id in self.identities:
-            name = self.identities[face_id].name
-            del self.identities[face_id]
-            print(f"[-] Deleted face from cache: {name} (ID: {face_id})")
-            return True
-        return False
-    
-    def find_match(self, encoding: List[float]) -> Optional[Tuple[FaceIdentity, float]]:
-        """Find matching face in database using Euclidean distance."""
-        if not self.identities:
-            return None
-        
-        encoding_array = np.array(encoding)
-        best_match = None
-        best_distance = float('inf')
-        
-        for identity in self.identities.values():
-            db_encoding = np.array(identity.encoding)
-            
-            # Dimension Check: Skip if shapes don't match (prevents errors between 128-d and 10-d)
-            if db_encoding.shape != encoding_array.shape:
-                continue
-                
-            distance = np.linalg.norm(encoding_array - db_encoding)
-            
-            if distance < best_distance:
-                best_distance = distance
-                best_match = identity
-        
-        confidence = max(0, 1.0 - best_distance)
-        if best_distance <= FACE_RECOGNITION_TOLERANCE:
-            return (best_match, confidence)
+            for u in db.get_all_users():
+                self.identities[u['id']] = FaceIdentity(u['id'], u['name'], u['face_encoding'])
+        except: pass
+    def find_match(self, encoding):
+        if not encoding or not self.identities: return None
+        enc_arr = np.array(encoding)
+        best_match, best_dist = None, float('inf')
+        for iden in self.identities.values():
+            dist = np.linalg.norm(enc_arr - np.array(iden.encoding))
+            if dist < best_dist: best_dist = dist; best_match = iden
+        if best_dist <= FACE_RECOGNITION_TOLERANCE: return best_match, 1.0 - best_dist
         return None
-    
-    def get_all_faces(self) -> List[FaceIdentity]:
-        """Get all registered faces."""
-        return list(self.identities.values())
-    
-    def update_last_seen(self, face_id: str):
-        """Update last seen timestamp in memory cache."""
-        if face_id in self.identities:
-            self.identities[face_id].last_seen = time.time()
-            self.identities[face_id].recognition_count += 1
-            # In a fully professional setup, we'd also update the DB:
-            # db.update_user_stats(face_id, time.time())
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Face Tracking and Recognition Engine
-# ───────────────────────────────────────────────────────────────────────────────
 
 class FaceRecognitionEngine:
-    """Main engine for face detection and recognition using dlib."""
-    
     def __init__(self):
-        self.database = FaceDatabase()
-        self.tracked_faces: Dict[str, TrackedFace] = {}
-        self.next_session_id = 0
-        self.frame_count = 0
+        self.db = FaceDatabase()
+        self.tracked_faces = {}
+        self.detector = dlib.get_frontal_face_detector() if DLIB_AVAILABLE else None
+        self.predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat") if DLIB_AVAILABLE else None
+        self.encoder = dlib.face_recognition_model_v1("dlib_face_recognition_resnet_model_v1.dat") if DLIB_AVAILABLE else None
         self.recording_mode = False
-        self.pending_registration_name = None
-        self.lock = threading.Lock()
-        
-        # Initialize dlib models
-        self._init_models()
-    
-    def _init_models(self):
-        """Initialize dlib face detection and recognition models."""
-        print("[*] Initializing dlib models...")
-        
-        # Download/get model paths
-        predictor_path, recognition_path = download_dlib_models()
-        
-        if not DLIB_AVAILABLE or not predictor_path or not recognition_path:
-            if not DLIB_AVAILABLE:
-                print("[!] dlib library is not installed.")
-            else:
-                print("[!] ERROR: dlib models not available!")
-            
-            print("[*] Using OpenCV Haar cascade as fallback for detection only")
-            self.detector = None
-            self.predictor = None
-            self.face_encoder = None
-            self.use_opencv_fallback = True
-            self.cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        else:
-            # dlib face detector (HOG-based)
-            self.detector = dlib.get_frontal_face_detector()
-            # 68-point facial landmark predictor
-            self.predictor = dlib.shape_predictor(predictor_path)
-            # Face recognition model (ResNet-based, 128-d encoding)
-            self.face_encoder = dlib.face_recognition_model_v1(recognition_path)
-            self.use_opencv_fallback = False
-            print("[+] dlib models loaded successfully")
-    
-    def _get_next_session_id(self) -> str:
-        """Generate unique session ID."""
-        sid = f"session_{self.next_session_id}"
-        self.next_session_id += 1
-        return sid
-    
-    def _rect_to_tuple(self, rect: dlib.rectangle) -> Tuple[int, int, int, int]:
-        """Convert dlib rect to (left, top, right, bottom)."""
-        return (rect.left(), rect.top(), rect.right(), rect.bottom())
-    
-    def _get_face_encoding(self, rgb_image: np.ndarray, rect: dlib.rectangle) -> Optional[List[float]]:
-        """Get face signature using MediaPipe geometry (dlib-free)."""
-        # We'll use the landmarks from the unified server if possible, 
-        # but for standalone, we use a simple ratio-based signature.
-        try:
-            # If dlib is available, use it
-            if DLIB_AVAILABLE and not self.use_opencv_fallback and self.face_encoder:
-                shape = self.predictor(rgb_image, rect)
-                return list(self.face_encoder.compute_face_descriptor(rgb_image, shape))
-            
-            # FALLBACK: Use MediaPipe landmarks for geometry signature
-            # (Note: In unified mode, we'll pass these from the main loop)
-            return None 
-        except:
-            return None
+        self.pending_name = None
+        self.next_sid = 0
 
-    def generate_geometry_signature(self, landmarks) -> List[float]:
-        """Create a 10-dimensional face signature based on landmark ratios."""
-        try:
-            # Pick key landmarks (using MediaPipe indices)
-            # 33, 133: Left eye corners | 362, 263: Right eye corners
-            # 1: Nose tip | 61, 291: Mouth corners | 152: Chin
-            
-            def dist(p1, p2):
-                return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2)**0.5
-
-            # Base measurements
-            eye_dist = dist(landmarks[33], landmarks[263])
-            face_height = dist(landmarks[10], landmarks[152]) # forehead to chin
-            
-            if eye_dist == 0 or face_height == 0: return [0.0] * 10
-            
-            # Create ratios (Scale invariant)
-            sig = [
-                dist(landmarks[33], landmarks[133]) / eye_dist,   # Left eye width
-                dist(landmarks[362], landmarks[263]) / eye_dist,  # Right eye width
-                dist(landmarks[61], landmarks[291]) / eye_dist,   # Mouth width
-                dist(landmarks[1], landmarks[152]) / face_height, # Nose to chin
-                dist(landmarks[33], landmarks[362]) / eye_dist,   # Inner eye distance
-                dist(landmarks[61], landmarks[1]) / face_height,  # Mouth to nose
-                dist(landmarks[10], landmarks[1]) / face_height,  # Forehead to nose
-                dist(landmarks[33], landmarks[61]) / face_height, # Eye to mouth
-                dist(landmarks[263], landmarks[291]) / face_height,
-                dist(landmarks[133], landmarks[362]) / eye_dist
-            ]
-            return sig
-        except:
-            return [0.0] * 10
-    
-    def _detect_faces_opencv(self, gray_image: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Detect faces using OpenCV Haar cascade (fallback)."""
-        if self.cascade is None:
-            return []
-        
-        faces = self.cascade.detectMultiScale(
-            gray_image,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE)
-        )
-        
-        # Convert (x, y, w, h) to (left, top, right, bottom)
-        results = []
-        for (x, y, w, h) in faces:
-            results.append((x, y, x + w, y + h))
-        return results
-    
-    def process_frame(self, frame: np.ndarray, external_encoding: Optional[List[float]] = None) -> np.ndarray:
-        """Process a single frame for face detection and recognition."""
-        self.frame_count += 1
-        h, w = frame.shape[:2]
-        
-        # Create a copy for drawing
-        display_frame = frame.copy()
-        
-        # Convert to RGB for dlib (dlib uses RGB)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Resize for faster processing
-        small_rgb = cv2.resize(rgb_frame, (0, 0), fx=FACE_DETECTION_SCALE, fy=FACE_DETECTION_SCALE)
-        
-        # Detect faces
-        face_rects = []
-        if self.use_opencv_fallback:
-            # Use OpenCV fallback
-            gray = cv2.cvtColor(small_rgb, cv2.COLOR_RGB2GRAY)
-            small_faces = self._detect_faces_opencv(gray)
-            # Scale back up
-            for left, top, right, bottom in small_faces:
-                face_rects.append(dlib.rectangle(
-                    int(left / FACE_DETECTION_SCALE),
-                    int(top / FACE_DETECTION_SCALE),
-                    int(right / FACE_DETECTION_SCALE),
-                    int(bottom / FACE_DETECTION_SCALE)
-                ))
-        else:
-            # Use dlib detector
-            small_rects = self.detector(small_rgb, 1)  # 1 = upsample once for better detection
-            # Scale back up
-            for rect in small_rects:
-                face_rects.append(dlib.rectangle(
-                    int(rect.left() / FACE_DETECTION_SCALE),
-                    int(rect.top() / FACE_DETECTION_SCALE),
-                    int(rect.right() / FACE_DETECTION_SCALE),
-                    int(rect.bottom() / FACE_DETECTION_SCALE)
-                ))
-        
-        # Update tracked faces
-        current_sessions = set()
-        
-        with self.lock:
-            for rect in face_rects:
-                # Get face encoding
-                face_encoding = self._get_face_encoding(rgb_frame, rect)
-                if not face_encoding:
-                    face_encoding = external_encoding
-                
-                # Check if matches existing tracked face
-                matched_session = self._match_existing_face(rect, face_encoding)
-                
-                if matched_session:
-                    # Update existing face
-                    tracked = self.tracked_faces[matched_session]
-                    tracked.rect = rect
-                    if face_encoding:
-                        tracked.encoding = face_encoding
-                    tracked.last_seen = time.time()
-                    current_sessions.add(matched_session)
-                    
-                    # Try recognition if not already recognized
-                    if not tracked.is_recognized and face_encoding:
-                        self._attempt_recognition(tracked)
-                else:
-                    # Create new tracked face
-                    session_id = self._get_next_session_id()
-                    new_face = TrackedFace(
-                        session_id=session_id,
-                        rect=rect,
-                        encoding=face_encoding
-                    )
-                    self.tracked_faces[session_id] = new_face
-                    current_sessions.add(session_id)
-                    
-                    # Try immediate recognition
-                    if face_encoding:
-                        self._attempt_recognition(new_face)
-                    
-                    # Notify new face detected
-                    if not new_face.is_recognized:
-                        broadcast(f"FACE_UNKNOWN:{session_id}")
-                        print(f"[*] New face session: {session_id}")
-            
-            # Check for registration mode
-            if self.recording_mode and self.pending_registration_name:
-                for session_id, tracked in self.tracked_faces.items():
-                    # If we are in fallback mode, we allow registration with a mock encoding
-                    if not tracked.is_recognized:
-                        if tracked.encoding or self.use_opencv_fallback:
-                            # Generate a mock encoding if missing in fallback mode
-                            if not tracked.encoding:
-                                tracked.encoding = list(np.random.rand(128))
-                                
-                            self._register_tracked_face(tracked, self.pending_registration_name)
-                            self.recording_mode = False
-                            self.pending_registration_name = None
-                            break
-            
-            # Remove lost faces
-            now = time.time()
-            lost_sessions = []
-            for session_id, tracked in self.tracked_faces.items():
-                if session_id not in current_sessions:
-                    if now - tracked.last_seen > FACE_LOSS_TIMEOUT:
-                        lost_sessions.append(session_id)
-            
-            for session_id in lost_sessions:
-                tracked = self.tracked_faces[session_id]
-                if tracked.is_recognized:
-                    broadcast(f"FACE_LEFT:{tracked.identity.id}")
-                    print(f"[-] Face left: {tracked.identity.name}")
-                else:
-                    broadcast(f"FACE_LEFT:{session_id}")
-                del self.tracked_faces[session_id]
-        
-        # Draw results on frame
-        self._draw_faces(display_frame)
-        
-        return display_frame
-    
-    def _match_existing_face(self, rect: dlib.rectangle, 
-                            encoding: Optional[List[float]]) -> Optional[str]:
-        """Match face to existing tracked face."""
-        center = ((rect.left() + rect.right()) // 2, 
-                  (rect.top() + rect.bottom()) // 2)
-        
-        best_match = None
-        best_distance = float('inf')
-        
-        for session_id, tracked in self.tracked_faces.items():
-            tracked_center = tracked.center
-            
-            # Calculate spatial distance
-            spatial_dist = ((center[0] - tracked_center[0]) ** 2 + 
-                           (center[1] - tracked_center[1]) ** 2) ** 0.5
-            
-            if spatial_dist < 100:  # Within 100 pixels
-                if encoding and tracked.encoding:
-                    # Compare face encodings (Euclidean distance)
-                    enc_dist = np.linalg.norm(
-                        np.array(encoding) - np.array(tracked.encoding)
-                    )
-                    if enc_dist < best_distance:
-                        best_distance = enc_dist
-                        best_match = session_id
-                elif spatial_dist < best_distance:
-                    best_distance = spatial_dist
-                    best_match = session_id
-        
-        return best_match if best_distance < 100 else None
-    
-    def _attempt_recognition(self, tracked: TrackedFace):
-        """Attempt to recognize a tracked face."""
-        if not tracked.encoding:
-            return
-        
-        # Check cooldown
-        if tracked.is_recognized:
-            if time.time() - tracked.last_seen < RECOGNITION_COOLDOWN:
-                return
-        
-        # Search database
-        result = self.database.find_match(tracked.encoding)
-        
-        if result:
-            identity, confidence = result
-            tracked.identity = identity
-            tracked.confidence = confidence
-            
-            # Update database stats
-            self.database.update_last_seen(identity.id)
-            
-            # Notify clients
-            broadcast(f"FACE_DETECTED:{identity.id}:{identity.name}:{confidence:.2f}")
-            print(f"[+] Recognized: {identity.name} (conf={confidence:.2f})")
-        else:
-            tracked.identity = None
-            tracked.confidence = 0.0
-    
-    def _register_tracked_face(self, tracked: TrackedFace, name: str):
-        """Register a tracked face to database."""
-        if not tracked.encoding:
-            print("[!] No encoding available for registration")
-            return False
-        
-        identity = self.database.register_face(name, tracked.encoding)
-        tracked.identity = identity
-        tracked.confidence = 1.0
-        return True
-    
-    def start_registration(self, name: str):
-        """Start registration mode for next detected face."""
-        with self.lock:
-            self.recording_mode = True
-            self.pending_registration_name = name
+    def start_registration(self, name):
+        self.recording_mode = True; self.pending_name = name
         print(f"[*] Registration mode active for: {name}")
-    
-    def cancel_registration(self):
-        """Cancel registration mode."""
-        with self.lock:
-            self.recording_mode = False
-            self.pending_registration_name = None
-        print("[*] Registration cancelled")
-    
-    def _draw_faces(self, frame: np.ndarray):
-        """Draw face bounding boxes and info."""
-        with self.lock:
-            for session_id, tracked in self.tracked_faces.items():
-                rect = tracked.rect
-                left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
-                
-                # Determine color based on recognition status
-                if tracked.is_recognized:
-                    color = (0, 255, 0)  # Green for recognized
-                    label = f"{tracked.identity.name} ({tracked.confidence:.2f})"
-                else:
-                    if self.use_opencv_fallback:
-                        color = (0, 165, 255)  # Orange for unknown (fallback mode)
-                        label = f"Unknown (fallback)"
-                    else:
-                        color = (0, 165, 255)  # Orange for unknown
-                        label = f"Unknown #{session_id[-4:]}"
-                
-                # Draw bounding box
-                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-                
-                # Draw label background
-                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(frame, (left, top - text_h - 10), (left + text_w, top), color, -1)
-                
-                # Draw label text
-                cv2.putText(frame, label, (left, top - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-                # Draw registration indicator
-                if self.recording_mode and not tracked.is_recognized:
-                    cv2.putText(frame, "[REGISTERING...]", (left, bottom + 20),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+    def process(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        small = cv2.resize(rgb, (0,0), fx=FACE_DETECTION_SCALE, fy=FACE_DETECTION_SCALE)
+        rects = self.detector(small, 1) if self.detector else []
         
-        # Draw status info
-        mode_text = "Fallback" if self.use_opencv_fallback else "dlib"
-        status_text = f"Mode: {mode_text} | Tracked: {len(self.tracked_faces)} | Registered: {len(self.database.identities)}"
-        if self.recording_mode:
-            status_text += f" | REGISTERING: {self.pending_registration_name}"
-        
-        cv2.putText(frame, status_text, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        # Draw controls
-        controls = "r:Register  d:Delete  l:List  s:Save  q:Quit"
-        cv2.putText(frame, controls, (10, frame.shape[0] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-    
-    def list_faces(self):
-        """Print list of registered faces."""
-        faces = self.database.get_all_faces()
-        if not faces:
-            print("[*] No registered faces")
-            return
-        
-        print("\n[*] Registered Faces:")
-        print("-" * 60)
-        for face in faces:
-            last_seen = time.strftime('%Y-%m-%d %H:%M:%S', 
-                          time.localtime(face.last_seen)) if face.last_seen else "Never"
-            print(f"  ID: {face.id}")
-            print(f"  Name: {face.name}")
-            print(f"  Created: {face.created_at}")
-            print(f"  Last Seen: {last_seen}")
-            print(f"  Recognitions: {face.recognition_count}")
-            print("-" * 60)
-    
-    def save_database(self):
-        """Save database to disk."""
-        self.database.save()
-    
-    def delete_face_interactive(self):
-        """Interactive face deletion."""
-        faces = self.database.get_all_faces()
-        if not faces:
-            print("[!] No faces to delete")
-            return
-        
-        print("\n[*] Select face to delete:")
-        for i, face in enumerate(faces):
-            print(f"  {i+1}. {face.name} (ID: {face.id})")
-        
-        try:
-            choice = input("Enter number (or 0 to cancel): ").strip()
-            idx = int(choice) - 1
-            if 0 <= idx < len(faces):
-                self.database.delete_face(faces[idx].id)
+        current_sids = set()
+        for r in rects:
+            scaled_rect = dlib.rectangle(int(r.left()/FACE_DETECTION_SCALE), int(r.top()/FACE_DETECTION_SCALE), 
+                                         int(r.right()/FACE_DETECTION_SCALE), int(r.bottom()/FACE_DETECTION_SCALE))
+            
+            shape = self.predictor(rgb, scaled_rect)
+            encoding = list(self.encoder.compute_face_descriptor(rgb, shape))
+            
+            # Simple spatial matching for tracking
+            matched_sid = None
+            for sid, tf in self.tracked_faces.items():
+                if abs(tf.rect.left() - scaled_rect.left()) < 50: matched_sid = sid; break
+            
+            if matched_sid:
+                tf = self.tracked_faces[matched_sid]
+                tf.rect = scaled_rect; tf.encoding = encoding; tf.last_seen = time.time()
+                current_sids.add(matched_sid)
             else:
-                print("[*] Cancelled")
-        except ValueError:
-            print("[!] Invalid input")
+                sid = f"face_{self.next_sid}"; self.next_sid += 1
+                tf = TrackedFace(sid, scaled_rect, encoding)
+                self.tracked_faces[sid] = tf; current_sids.add(sid)
+                send_to_hub(f"FACE_UNKNOWN:{sid}")
+            
+            # Attempt Recognition
+            match = self.db.find_match(encoding)
+            label = "Unknown"
+            color = (0, 0, 255) # Red for unknown
+            if match:
+                iden, conf = match; tf.identity = iden
+                label = f"{iden.name} ({conf:.2f})"
+                color = (0, 255, 0) # Green for recognized
+                send_to_hub(f"FACE_DETECTED:{iden.id}:{iden.name}:{conf:.2f}")
+            
+            # Draw on frame for "Monitor" view
+            x1, y1, x2, y2 = scaled_rect.left(), scaled_rect.top(), scaled_rect.right(), scaled_rect.bottom()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
+            # Registration
+            if self.recording_mode and self.pending_name:
+                new_id = db.register_user(self.pending_name, encoding)
+                self.db.identities[new_id] = FaceIdentity(new_id, self.pending_name, encoding)
+                send_to_hub(f"FACE_REGISTERED:{new_id}:{self.pending_name}")
+                self.recording_mode = False; self.pending_name = None
+                cv2.putText(frame, "REGISTRATION SUCCESS", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 3)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Main Entry Point
-# ───────────────────────────────────────────────────────────────────────────────
+        # Cleanup lost faces
+        lost = [sid for sid, tf in self.tracked_faces.items() if time.time() - tf.last_seen > FACE_LOSS_TIMEOUT]
+        for sid in lost:
+            tf = self.tracked_faces[sid]
+            msg = f"FACE_LEFT:{tf.identity.id if tf.identity else sid}"
+            send_to_hub(msg); del self.tracked_faces[sid]
+
+def recv_all(sock, n):
+    data = b''
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet: return None
+        data += packet
+    return data
+
+def download_models():
+    """Download dlib models if missing."""
+    import urllib.request
+    import bz2
+    models = {
+        "shape_predictor_68_face_landmarks.dat": "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2",
+        "dlib_face_recognition_resnet_model_v1.dat": "http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2"
+    }
+    for name, url in models.items():
+        if not os.path.exists(name):
+            print(f"[*] Downloading {name} (this may take a minute)...")
+            bz2_name = name + ".bz2"
+            urllib.request.urlretrieve(url, bz2_name)
+            print(f"[*] Extracting {name}...")
+            with bz2.BZ2File(bz2_name) as fr, open(name, "wb") as fw:
+                fw.write(fr.read())
+            os.remove(bz2_name)
+            print(f"[+] {name} ready.")
 
 def main():
-    """Main function."""
-    print("=" * 70)
-    print("Face Identification Scenario for AR")
-    print("=" * 70)
-    print("\nWhat it does:")
-    print("  • Detects faces in real-time from camera feed")
-    print("  • Recognizes registered users by face matching (128-d encoding)")
-    print("  • Assigns persistent identity to detected faces")
-    print("  • Communicates face events to AR clients via TCP port 5003")
-    print("\nBenefits for AR:")
-    print("  [OK] Personalized content based on user identity")
-    print("  [OK] Secure access control for sensitive scenarios")
-    print("  [OK] Multi-user support (different content per user)")
-    print("  [OK] User attention and engagement tracking")
-    print("  [OK] Attendance logging for educational AR apps")
-    print("=" * 70)
-    
-    # Start TCP server in background thread
-    tcp_thread = threading.Thread(target=start_tcp_server, daemon=True)
-    tcp_thread.start()
-    
-    # Initialize face recognition engine
+    print(">>> Face Identifier Starting...")
+    print("=== Story Builder Face Identifier ===")
+    if DLIB_AVAILABLE:
+        download_models()
     engine = FaceRecognitionEngine()
+    connect_to_hub()
+    threading.Thread(target=hub_listener, args=(engine,), daemon=True).start()
     
-    # Camera setup
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(1)
-    if not cap.isOpened():
-        print("[!] Error: Could not open camera")
-        return
+    frame_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    while True:
+        try:
+            frame_sock.connect((BROADCASTER_IP, BROADCASTER_PORT))
+            print("[+] Face Worker: Connected to Broadcaster.")
+            break
+        except:
+            print("[.] Face Worker: Waiting for Broadcaster...")
+            time.sleep(2)
     
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    print("\n[*] Face Identifier started")
-    print("[*] Controls:")
-    print("    r - Register new face")
-    print("    d - Delete registered face")
-    print("    l - List registered faces")
-    print("    s - Save database")
-    print("    q - Quit")
-    
+    frame_counter = 0
     try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        while True:
+            header = recv_all(frame_sock, 4)
+            if not header: break
+            size = struct.unpack(">L", header)[0]
+            img_data = recv_all(frame_sock, size)
+            if not img_data: break
             
-            # Mirror frame for natural interaction
-            frame = cv2.flip(frame, 1)
+            frame_counter += 1
+            if frame_counter % 3 != 0: # Process every 3rd frame (Face ID is slow)
+                continue
             
-            # Process frame
-            display = engine.process_frame(frame)
+            nparr = np.frombuffer(img_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is None: continue
             
-            # Show result
-            cv2.imshow("Face Identification - AR Scenario", display)
-            
-            # Handle keyboard input
-            key = cv2.waitKey(5) & 0xFF
-            
-            if key == ord('q'):
-                break
-            
-            elif key == ord('r'):
-                if not engine.recording_mode:
-                    name = input("\nEnter name for new face: ").strip()
-                    if name:
-                        engine.start_registration(name)
-                else:
-                    engine.cancel_registration()
-            
-            elif key == ord('d'):
-                engine.delete_face_interactive()
-            
-            elif key == ord('l'):
-                engine.list_faces()
-            
-            elif key == ord('s'):
-                engine.save_database()
-    
+            engine.process(frame)
+            cv2.imshow("Face Worker (Distributed)", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
     finally:
-        cap.release()
-        cv2.destroyAllWindows()
-        engine.save_database()
-        print("\n[*] Face identifier stopped.")
-
+        frame_sock.close(); hub_conn.close(); cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()

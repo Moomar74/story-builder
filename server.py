@@ -1,215 +1,138 @@
 import socket
-import asyncio
-from bleak import BleakScanner
 import threading
-import os
+import time
 
-# Global state
-connected_clients = []
-discovered_devices = []
-# Map of BT_Address -> MarkerID to watch for
-# This will be populated from users.txt and updated manually via client messages
-watched_devices = {}
-# Track which devices are currently "Present" to handle Auto-Logout
-active_sessions = {}  # Map of Address -> MarkerID
+# --- Configuration ---
+INTERNAL_PORT = 6001    # For Python Services (Gaze, Face, BT, etc.)
+CLIENT_PORT = 5003      # For C# Client
 
-def load_users_to_watch():
-    """Tries to find users.txt and pre-populate the watch list."""
-    global watched_devices
-    # Try common locations
-    paths_to_check = [
-        "users.txt",
-        "Client/Client/TUIO11_NET-master/bin/Debug/users.txt",
-        "Client/Client/TUIO11_NET-master/users.txt"
-    ]
-    
-    found = False
-    for p in paths_to_check:
-        if os.path.exists(p):
-            print(f"[*] Loading user watch list from {p}")
-            try:
-                with open(p, "r") as f:
-                    for line in f:
-                        parts = line.strip().split("|")
-                        if len(parts) >= 3:
-                            # format: mkr_id|name|bt_addr
-                            mkr_id = parts[0]
-                            bt_addr = parts[2].strip().upper()
-                            if bt_addr and bt_addr != "N/A" and bt_addr != "NONE":
-                                watched_devices[bt_addr] = mkr_id
-                found = True
-                break
-            except Exception as e:
-                pass
-    
-    if found:
-        print(f"[*] Initialized watch list with {len(watched_devices)} device(s).")
-    else:
-        print("[!] users.txt not found. Automatic login will require client to send WATCH_BT.")
+# --- State ---
+python_services = []    # List of sockets for internal services
+client_connections = [] # List of sockets for C# clients
+state_lock = threading.Lock()
 
-async def scanBT():
-    """Periodically scans for Bluetooth devices and notifies clients."""
-    global discovered_devices
-    print("[*] Bluetooth scanner started.")
-    while True:
-        try:
-            print("[.] Scanning for devices...", end='\r')
-            devices = await BleakScanner.discover(timeout=5.0)
-            discovered_devices = devices
-            
-            # 1. Prepare BT_LIST message
-            dev_strings = []
-            seen_addresses = set()
-            for d in devices:
-                if d.address not in seen_addresses:
-                    name = d.name if d.name else "Unknown"
-                    dev_strings.append(f"{name}|{d.address}")
-                    seen_addresses.add(d.address)
-            
-            msg = "BT_LIST:" + ",".join(dev_strings)
-            broadcast(msg)
-            print(f"\n[*] Scan complete. Found {len(devices)} device(s):")
-            for d in devices:
-                print(f"    - {d.name} [{d.address}]")
-            print(f"[*] Notified {len(connected_clients)} client(s).")
-            
-            # 2. Check for watched devices (Auto-Login & Attendance)
-            current_addresses = {d.address.upper() for d in devices}
-            
-            # --- Handle Login & Attendance ---
-            for addr, marker_id in list(watched_devices.items()):
-                addr_up = addr.upper()
-                if addr_up in current_addresses:
-                    if addr_up not in active_sessions:
-                        # First time seeing this device this session
-                        print(f"[!] Attendance Recorded: Device {addr} (User {marker_id})")
-                        broadcast(f"ATTENDANCE_LOGGED:{marker_id}")
-                        broadcast(f"AUTOLOGIN:{marker_id}")
-                        active_sessions[addr_up] = marker_id
-            
-            # --- Handle Auto-Logout (Scenario: Student leaves room) ---
-            for addr_up in list(active_sessions.keys()):
-                if addr_up not in current_addresses:
-                    marker_id = active_sessions[addr_up]
-                    print(f"[-] Device {addr_up} left range. Triggering Auto-Logout for User {marker_id}")
-                    broadcast(f"AUTOLOGOUT:{marker_id}")
-                    del active_sessions[addr_up]
-                    
-        except Exception as e:
-            print(f"\n[!] Scan error: {e}")
-        
-        await asyncio.sleep(8) # Scan every 8 seconds
-
-def broadcast(message):
-    """Sends a message to all connected TCP clients."""
+def broadcast_to_client(message):
+    """Sends a message to all connected C# clients."""
     if not message.endswith('\n'):
         message += '\n'
-    
     msg_bytes = message.encode('utf-8')
-    for conn in list(connected_clients):
-        try:
-            conn.sendall(msg_bytes)
-        except Exception:
-            if conn in connected_clients:
-                connected_clients.remove(conn)
-
-def handle_client(conn, addr):
-    """Handles messages from a client and keeps it in the broadcast list."""
-    print(f"[+] Client connected: {addr}")
-    # Before adding to broadcast list, tell it about current devices
-    # AND check if any of those devices match its watch list already
     
-    global discovered_devices
-    connected_clients.append(conn)
-    
-    # 1. Send current device list
-    if discovered_devices:
-        dev_strings = []
-        current_addresses = set()
-        for d in discovered_devices:
-            name = d.name if d.name else "Unknown"
-            dev_strings.append(f"{name}|{d.address}")
-            current_addresses.add(d.address)
-        
-        initial_msg = "BT_LIST:" + ",".join(dev_strings) + "\n"
-        try:
-            conn.sendall(initial_msg.encode('utf-8'))
-            
-            # 2. ALSO check if any watched device is already here!
-            # If we know the user's BT address from users.txt (which we loaded at start)
-            # we can tell the client to log in IMMEDIATELY.
-            for bt_addr, mkr_id in watched_devices.items():
-                if bt_addr in current_addresses:
-                    print(f"[!] Watched device {bt_addr} already detected. Sending instant login for Marker {mkr_id} to new client.")
-                    conn.sendall(f"AUTOLOGIN:{mkr_id}\n".encode('utf-8'))
-        except Exception:
-            pass
+    with state_lock:
+        for conn in list(client_connections):
+            try:
+                conn.sendall(msg_bytes)
+            except Exception:
+                if conn in client_connections:
+                    client_connections.remove(conn)
 
+def broadcast_to_services(message):
+    """Sends a command to all connected Python services."""
+    if not message.endswith('\n'):
+        message += '\n'
+    msg_bytes = message.encode('utf-8')
+    
+    with state_lock:
+        for conn in list(python_services):
+            try:
+                conn.sendall(msg_bytes)
+            except Exception:
+                if conn in python_services:
+                    python_services.remove(conn)
+
+def handle_internal_service(conn, addr):
+    """Handles data from Python services (Gaze, Face, BT, etc.)."""
+    print(f"[+] Internal Service connected: {addr}")
+    with state_lock:
+        python_services.append(conn)
+    
     try:
         while True:
             data = conn.recv(1024)
             if not data:
                 break
             
+            # Relay message from service to C# clients
             msg = data.decode('utf-8').strip()
-            if not msg: continue
-            
-            print(f"[<] Message from {addr}: {msg}")
-            
-            # WATCH_BT:address|marker_id,address|marker_id...
-            if msg.startswith("WATCH_BT:"):
-                items = msg[9:].split(",")
-                for item in items:
-                    parts = item.split("|")
-                    if len(parts) == 2:
-                        watched_devices[parts[0]] = parts[1]
-                print(f"[*] Updated watch list: {len(watched_devices)} active items.")
+            if msg:
+                print(f"[RELAY] Service -> Client: {msg}")
+                broadcast_to_client(msg)
                 
     except Exception as e:
-        pass
+        print(f"[!] Internal Service error {addr}: {e}")
     finally:
-        if conn in connected_clients:
-            connected_clients.remove(conn)
+        with state_lock:
+            if conn in python_services:
+                python_services.remove(conn)
         conn.close()
-        print(f"[-] Client disconnected: {addr}")
+        print(f"[-] Internal Service disconnected: {addr}")
 
-def start_tcp_server():
-    """Synchronous TCP server loop."""
+def handle_client(conn, addr):
+    """Handles data from C# clients."""
+    print(f"[+] C# Client connected: {addr}")
+    with state_lock:
+        client_connections.append(conn)
+    
+    try:
+        while True:
+            data = conn.recv(1024)
+            if not data:
+                break
+            
+            # Relay command from Client to Python services
+            msg = data.decode('utf-8').strip()
+            if msg:
+                print(f"[RELAY] Client -> Services: {msg}")
+                broadcast_to_services(msg)
+                
+    except Exception as e:
+        print(f"[!] C# Client error {addr}: {e}")
+    finally:
+        with state_lock:
+            if conn in client_connections:
+                client_connections.remove(conn)
+        conn.close()
+        print(f"[-] C# Client disconnected: {addr}")
+
+def internal_server_loop():
+    """Server for Python services."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        server.bind(("0.0.0.0", 5000))
-        server.listen(5)
-        print("[*] TCP Server listening on 0.0.0.0:5000")
-    except Exception as e:
-        print(f"[!] Server bind error: {e}")
-        return
-
+    server.bind(("0.0.0.0", INTERNAL_PORT))
+    server.listen(10)
+    print(f"[*] Hub: Listening for Services on port {INTERNAL_PORT}")
+    
     while True:
-        try:
-            conn, addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(conn, addr))
-            t.daemon = True
-            t.start()
-        except Exception:
-            break
+        conn, addr = server.accept()
+        threading.Thread(target=handle_internal_service, args=(conn, addr), daemon=True).start()
 
-async def main():
-    # Load users from file first
-    load_users_to_watch()
+def client_server_loop():
+    """Server for C# clients."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", CLIENT_PORT))
+    server.listen(5)
+    print(f"[*] Hub: Listening for C# Client on port {CLIENT_PORT}")
     
-    # Start TCP server in background thread
-    tcp_thread = threading.Thread(target=start_tcp_server)
-    tcp_thread.daemon = True
-    tcp_thread.start()
+    while True:
+        conn, addr = server.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+def main():
+    print(">>> Interaction Hub Starting...")
+    print("=== Story Builder Interaction Hub ===")
     
-    # Run BT scanner
-    await scanBT()
+    # Start both server loops
+    t1 = threading.Thread(target=internal_server_loop, daemon=True)
+    t2 = threading.Thread(target=client_server_loop, daemon=True)
+    
+    t1.start()
+    t2.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[*] Hub stopping...")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[*] Server stopping...")
-    except Exception as e:
-        print(f"[!] Fatal error: {e}")
+    main()

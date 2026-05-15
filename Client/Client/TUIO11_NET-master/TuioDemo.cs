@@ -41,6 +41,9 @@ public class TuioDemo : Form, TuioListener
         {
             if (_state != value)
             {
+                string oldPage = _state.ToString();
+                string userKey = CurrentGazeHeatmapUserKey();
+                SaveGazeHeatmapSnapshotForPage(userKey, oldPage);
                 _state = value;
                 SendGazePageState();  // Notify gaze server of page change
 
@@ -278,19 +281,87 @@ public class TuioDemo : Form, TuioListener
     private bool isBlinking = false;
     private DateTime lastGazeTime = DateTime.MinValue;
 
-    // Heatmap data per page - stores gaze points as normalized coordinates
-    private Dictionary<string, List<PointF>> gazeHeatmapData = new Dictionary<string, List<PointF>>
-    {
-        { "SignIn", new List<PointF>() },
-        { "SignUp", new List<PointF>() },
-        { "StorySelection", new List<PointF>() },
-        { "StoryPlayer", new List<PointF>() },
-        { "StoryBuilder", new List<PointF>() }
-    };
+    // Gaze points per user key, then per page (normalized 0–1). User keys: DB id, guest, teacher, anonymous.
+    private readonly Dictionary<string, Dictionary<string, List<PointF>>> gazeHeatmapByUser =
+        new Dictionary<string, Dictionary<string, List<PointF>>>(StringComparer.Ordinal);
     private bool heatmapVisible = false;
     private int heatmapGridSize = 20;  // Size of each heatmap cell in pixels
     private Bitmap[] heatmapCache = new Bitmap[5];  // Cached heatmap images for each page
     private string[] heatmapPageNames = { "SignIn", "SignUp", "StorySelection", "StoryPlayer", "StoryBuilder" };
+
+    /// <summary>Stable folder key for gaze heatmap storage (avoids conflating unsigned-in vs teacher, both use id -1).</summary>
+    private string CurrentGazeHeatmapUserKey()
+    {
+        if (isTeacherMode) return "teacher";
+        if (loggedInUserId == "0") return "guest";
+        if (!string.IsNullOrEmpty(loggedInUserId) && loggedInUserId != "-1") return loggedInUserId;
+        return "anonymous";
+    }
+
+    private List<PointF> GetOrCreateHeatmapList(string userKey, string pageName)
+    {
+        Dictionary<string, List<PointF>> pages;
+        if (!gazeHeatmapByUser.TryGetValue(userKey, out pages))
+        {
+            pages = new Dictionary<string, List<PointF>>(StringComparer.Ordinal);
+            gazeHeatmapByUser[userKey] = pages;
+        }
+        List<PointF> list;
+        if (!pages.TryGetValue(pageName, out list))
+        {
+            list = new List<PointF>();
+            pages[pageName] = list;
+        }
+        return list;
+    }
+
+    private List<PointF> GetHeatmapPoints(string userKey, string pageName)
+    {
+        Dictionary<string, List<PointF>> pages;
+        if (!gazeHeatmapByUser.TryGetValue(userKey, out pages)) return null;
+        List<PointF> list;
+        if (!pages.TryGetValue(pageName, out list)) return null;
+        return list;
+    }
+
+    private static string SanitizePathSegment(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "unknown";
+        foreach (char c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return name.Length > 80 ? name.Substring(0, 80) : name;
+    }
+
+    /// <summary>Writes a PNG heatmap for this user and page under gaze_heatmaps/&lt;userKey&gt;/.</summary>
+    private void SaveGazeHeatmapSnapshotForPage(string userKey, string pageName)
+    {
+        if (string.IsNullOrEmpty(userKey) || string.IsNullOrEmpty(pageName)) return;
+        if (Array.IndexOf(heatmapPageNames, pageName) < 0) return;
+
+        List<PointF> points = GetHeatmapPoints(userKey, pageName);
+        if (points == null || points.Count == 0) return;
+
+        using (Bitmap heatmap = GenerateHeatmapFromPoints(points, width, height, opaqueBackground: true))
+        {
+            if (heatmap == null) return;
+            try
+            {
+                string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gaze_heatmaps");
+                string dir = Path.Combine(root, SanitizePathSegment(userKey));
+                Directory.CreateDirectory(dir);
+                string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string file = Path.Combine(dir, SanitizePathSegment(pageName) + "_" + stamp + ".png");
+                heatmap.Save(file, ImageFormat.Png);
+            }
+            catch { }
+        }
+    }
+
+    private void InvalidateHeatmapCaches()
+    {
+        for (int i = 0; i < heatmapCache.Length; i++)
+            heatmapCache[i] = null;
+    }
 
     // -- Adaptive Menu System (Gaze-Based) ---------------------
     private float adaptiveMenuTargetX = 0.5f;   // Target position from server (normalized)
@@ -302,6 +373,8 @@ public class TuioDemo : Form, TuioListener
     private bool adaptiveMenuEnabled = true;
     private DateTime adaptiveMenuLastUpdate = DateTime.MinValue;
     private const float MENU_LERP_SPEED = 0.08f;  // Smooth animation speed
+    private NetworkStream hubStream = null;
+
 
     // =========================================================
     //  Constructor
@@ -408,78 +481,39 @@ public class TuioDemo : Form, TuioListener
         client.addTuioListener(this);
         client.connect();
 
-        // Start socket listener thread
-        socketThread = new Thread(new ThreadStart(StartSocketClient));
-        socketThread.IsBackground = true;
-        socketThread.Start();
-
-        // Start gesture listener thread
-        gestureThread = new Thread(new ThreadStart(StartGestureClient));
-        gestureThread.IsBackground = true;
-        gestureThread.Start();
-
-        // Start gaze tracking listener thread
-        gazeThread = new Thread(new ThreadStart(StartGazeClient));
-        gazeThread.IsBackground = true;
-        gazeThread.Start();
-
-        // Start FaceID tracking listener thread (Port 5003)
-        Thread faceThread = new Thread(new ThreadStart(StartFaceIdClient));
-        faceThread.IsBackground = true;
-        faceThread.Start();
+        // Start Unified Hub listener thread (Port 5003)
+        // This handles Face, Gaze, Gesture, Bluetooth, and Laser data relayed by the Python Hub.
+        Thread hubThread = new Thread(new ThreadStart(StartHubClient));
+        hubThread.IsBackground = true;
+        hubThread.Start();
     }
 
-    private void StartFaceIdClient()
+    private void StartHubClient()
     {
         while (isSocketActive)
         {
             try
             {
-                TcpClient faceSocket = new TcpClient("localhost", 5003);
-                NetworkStream stream = faceSocket.GetStream();
-                byte[] buffer = new byte[8192];
+                TcpClient hubSocket = new TcpClient("localhost", 5003);
+                hubStream = hubSocket.GetStream();
+                byte[] buffer = new byte[16384];
+                
+                Console.WriteLine("[+] Connected to Hub (Port 5003)");
+                
+                // Initial sync
+                SendGazePageState();
+                RefreshWatchList();
+
                 while (isSocketActive)
                 {
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    int bytesRead = hubStream.Read(buffer, 0, buffer.Length);
+
                     if (bytesRead == 0) break;
                     string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     foreach (string msg in messages)
                     {
-                        this.Invoke((MethodInvoker)delegate {
-                            if (msg.StartsWith("FACE_DETECTED:"))
-                            {
-                                string[] p = msg.Split(':');
-                                if (p.Length >= 3)
-                                {
-                                    string userId = p[1];
-                                    if (state == AppState.SignIn && !signInOk)
-                                    {
-                                        var user = db.GetUserById(userId);
-                                        if (user != null)
-                                        {
-                                            loggedInUser = user.Name;
-                                            loggedInUserId = user.Id;
-                                            signInOk = true;
-                                            signInMessage = "Welcome back, " + user.Name + "!";
-
-                                            // Role-based redirection
-                                            if (user.Role == "Teacher")
-                                            {
-                                                state = AppState.TeacherPanel;
-                                            }
-                                            else
-                                            {
-                                                state = AppState.StorySelection;
-                                            }
-
-                                            db.RecordLogin(user.Id);
-                                            Invalidate();
-                                        }
-                                    }
-                                }
-                            }
-                        });
+                        this.Invoke((MethodInvoker)delegate { HandleHubMessage(msg); });
                     }
                 }
             }
@@ -487,28 +521,61 @@ public class TuioDemo : Form, TuioListener
         }
     }
 
-    private void StartSocketClient()
+    private void HandleHubMessage(string msg)
     {
-        socketClient = new SocketClient();
-        if (socketClient.Connect("localhost", 5000))
+        if (string.IsNullOrWhiteSpace(msg)) return;
+        
+        // Dispatch by prefix
+        if (msg.StartsWith("FACE_")) HandleFaceMessage(msg);
+        else if (msg.StartsWith("GAZE") || msg.StartsWith("BLINK:") || msg.StartsWith("MENU_POS:")) HandleGazeMessage(msg);
+        else if (msg.StartsWith("GESTURE:") || msg.StartsWith("HAND_") || msg.StartsWith("SKELETON:") || msg.StartsWith("MENU_")) HandleGestureMessage(msg);
+        else if (msg.StartsWith("BT_") || msg.StartsWith("AUTO") || msg.StartsWith("ATTENDANCE_") || msg.ToLower().Contains("next") || msg.ToLower().Contains("prev") || msg.ToLower() == "signin") HandleSocketMessage(msg);
+        else if (msg.StartsWith("LASER")) HandleLaserMessage(msg);
+    }
+
+    private void HandleFaceMessage(string msg)
+    {
+        if (msg.StartsWith("FACE_DETECTED:"))
         {
-            // Tell the server which Bluetooth addresses we care about
-            RefreshWatchList();
-
-            while (isSocketActive)
+            string[] p = msg.Split(':');
+            if (p.Length >= 3)
             {
-                string rawData = socketClient.ReceiveMessage();
-                if (string.IsNullOrEmpty(rawData)) break;
-                if (rawData == "q") break;
-
-                // Handle multiple messages in one packet (framed by \n)
-                string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string msg in messages)
+                string userId = p[1];
+                if (state == AppState.SignIn && !signInOk)
                 {
-                    this.Invoke((MethodInvoker)delegate
+                    var user = db.GetUserById(userId);
+                    if (user != null)
                     {
-                        HandleSocketMessage(msg);
-                    });
+                        loggedInUser = user.Name;
+                        loggedInUserId = user.Id;
+                        signInOk = true;
+                        signInMessage = "Welcome back, " + user.Name + "!";
+                        if (user.Role == "Teacher") state = AppState.TeacherPanel;
+                        else state = AppState.StorySelection;
+                        db.RecordLogin(user.Id);
+                        Invalidate();
+                    }
+                }
+            }
+        }
+    }
+
+    private void HandleLaserMessage(string msg)
+    {
+        if (msg.StartsWith("LASER:"))
+        {
+            string[] p = msg.Substring(6).Split(',');
+            if (p.Length == 2)
+            {
+                float lx, ly;
+                if (float.TryParse(p[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out lx) &&
+                    float.TryParse(p[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ly))
+                {
+                    mk33X = lx;
+                    mk33Y = ly;
+                    mk33Present = true;
+                    if (state == AppState.StorySelection) UpdateStoryHoverFromPointer(lx, ly);
+                    Invalidate();
                 }
             }
         }
@@ -517,12 +584,10 @@ public class TuioDemo : Form, TuioListener
     private void HandleSocketMessage(string msg)
     {
         lastSocketMsg = msg;
-        string raw = msg;
         msg = msg.Trim();
 
         if (msg.StartsWith("BT_LIST:"))
         {
-            // Format: BT_LIST:Name1|Addr1,Name2|Addr2...
             discoveredBtDevices.Clear();
             string list = msg.Substring(8);
             if (!string.IsNullOrEmpty(list))
@@ -537,7 +602,6 @@ public class TuioDemo : Form, TuioListener
         }
         else if (msg.StartsWith("AUTOLOGIN:"))
         {
-            // Format: AUTOLOGIN:MarkerID
             int mkr;
             if (int.TryParse(msg.Substring(10).Trim(), out mkr))
             {
@@ -551,7 +615,6 @@ public class TuioDemo : Form, TuioListener
         }
         else if (msg.StartsWith("ATTENDANCE_LOGGED:"))
         {
-            // PACT Requirement: Teacher (Mena) wants to track attendance automatically
             int mkr;
             if (int.TryParse(msg.Substring(18).Trim(), out mkr))
             {
@@ -563,15 +626,11 @@ public class TuioDemo : Form, TuioListener
         }
         else if (msg.StartsWith("AUTOLOGOUT:"))
         {
-            // PACT Scenario Step 12: System logs out automatically when student leaves room
-            // Close attendance session in database
             if (currentAttendanceId >= 0)
             {
                 db.EndAttendanceSession(currentAttendanceId, studentScenesCompleted, studentChallengesCompleted);
                 currentAttendanceId = -1;
             }
-
-            // Log the logout to attendance file for teacher records
             try
             {
                 string logEntry = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " | Name: " + (loggedInUser ?? "Guest") + " | Status: Auto-Logout (Left Range)";
@@ -602,49 +661,17 @@ public class TuioDemo : Form, TuioListener
             }
             else if (msg == "signin" && state == AppState.SignIn)
             {
-                DoLogin(10); // Login as guest by default on remote signin command
+                DoLogin(10);
             }
         }
     }
 
-    private void StartGestureClient()
-    {
-        while (isSocketActive)
-        {
-            try
-            {
-                gestureSocket = new TcpClient("localhost", 5001);
-                gestureConnected = true;
-                NetworkStream stream = gestureSocket.GetStream();
-                byte[] buffer = new byte[8192];
-
-                while (isSocketActive)
-                {
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break;
-
-                    string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (string msg in messages)
-                    {
-                        this.Invoke((MethodInvoker)delegate { HandleGestureMessage(msg); });
-                    }
-                }
-            }
-            catch (Exception)
-            {
-                gestureConnected = false;
-                Thread.Sleep(2000); // Retry after 2 seconds
-            }
-        }
-    }
 
     private void HandleGestureMessage(string msg)
     {
         msg = msg.Trim();
         if (msg.StartsWith("SKELETON:"))
         {
-            // Simple string parsing instead of full JSON to avoid dependencies
             string json = msg.Substring(9);
             skeleton.Clear();
             string[] parts = json.Replace("{", "").Replace("}", "").Replace("\"", "").Split(',');
@@ -668,16 +695,64 @@ public class TuioDemo : Form, TuioListener
             skeletonVisible = true;
             Invalidate();
         }
+        else if (msg.StartsWith("HAND_CURSOR:"))
+        {
+            string coords = msg.Substring(12);
+            string[] cp = coords.Split(',');
+            if (cp.Length == 2)
+            {
+                float hx, hy;
+                if (float.TryParse(cp[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out hx) &&
+                    float.TryParse(cp[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out hy))
+                {
+                    mk33X = hx;
+                    mk33Y = hy;
+                    mk33Present = true;
+                    if (state == AppState.StorySelection) UpdateStoryHoverFromPointer(hx, hy);
+                }
+            }
+        }
+        else if (msg.StartsWith("HAND_STATE:"))
+        {
+            string hs = msg.Substring(11);
+            lastGesture = "hand:" + hs;
+            lastGestureTime = DateTime.Now;
+        }
         else if (msg.StartsWith("GESTURE:"))
         {
             lastGesture = msg.Substring(8);
             lastGestureTime = DateTime.Now;
 
-            // Trigger action based on gesture
-            if (state == AppState.StorySelection)
+            if (state == AppState.SignIn && !signInOk)
+            {
+                if (lastGesture == "palm_login") DoLogin(10);
+                else if (lastGesture == "peace_signup")
+                {
+                    suName = "";
+                    suStatus = "Place markers 0-24 to spell your name.  Marker 25 (hold 2 s) = DONE.";
+                    suAssignedId = "-1";
+                    suPhase = SignUpPhase.NameEntry;
+                    suConfirmSessionId = -1;
+                    suMarkersOnTable.Clear();
+                    state = AppState.SignUp;
+                }
+            }
+            else if (state == AppState.StorySelection)
             {
                 if (lastGesture == "swipe_right") spStoryIndex = Math.Min(3, spStoryIndex + 1);
                 else if (lastGesture == "swipe_left") spStoryIndex = Math.Max(0, spStoryIndex - 1);
+                else if (lastGesture == "click" && spStorySelectHover >= 0)
+                {
+                    spStoryIndex = spStorySelectHover;
+                    spSceneIndex = 0;
+                    ResetSceneAnimation();
+                    state = AppState.StoryPlayer;
+                }
+                else if (lastGesture == "thumbs_up")
+                {
+                    state = AppState.SignIn;
+                    signInOk = false;
+                }
                 Invalidate();
             }
             else if (state == AppState.StoryPlayer)
@@ -700,17 +775,19 @@ public class TuioDemo : Form, TuioListener
                         Invalidate();
                     }
                 }
+                else if (lastGesture == "swipe_up" && spPhase == ScenePhase.TALK)
+                {
+                    spDialogueIndex++;
+                    Invalidate();
+                }
+                else if (lastGesture == "thumbs_up") state = AppState.StorySelection;
 
                 if (spPhase == ScenePhase.CHALLENGE && !spChallengeComplete)
                 {
-                    // Map gesture to challenge success
                     if (StoryDatabase.AllStories[spStoryIndex].Scenes[spSceneIndex].Challenge.RequiredMarkerId > 0)
                     {
-                        // Any distinct gesture can "complete" the challenge if interacting via gesture!
                         if (lastGesture == "wave" || lastGesture == "circle" || lastGesture == "push" || lastGesture == "click")
-                        {
                             CompleteChallenge();
-                        }
                     }
                 }
             }
@@ -741,61 +818,28 @@ public class TuioDemo : Form, TuioListener
                 {
                     circMenuSelected = idx;
                     circMenuSelectTime = DateTime.Now;
-
-                    // Menu actions
-                    if (idx < 4) // Stories
+                    if (idx < 4)
                     {
                         spStoryIndex = idx;
                         spSceneIndex = 0;
                         ResetSceneAnimation();
                         state = AppState.StoryPlayer;
                     }
-                    else if (idx == 4) // Back
-                        state = AppState.StorySelection;
-
-                    circMenuVisible = false; // Auto close
+                    else if (idx == 4) state = AppState.StorySelection;
+                    circMenuVisible = false;
                     Invalidate();
                 }
             }
         }
     }
 
-    // =========================================================
-    //  Gaze Tracking Client (Port 5002)
-    // =========================================================
-    private void StartGazeClient()
+    private void UpdateStoryHoverFromPointer(float nx, float ny)
     {
-        while (isSocketActive)
-        {
-            try
-            {
-                gazeSocket = new TcpClient("localhost", 5002);
-                gazeConnected = true;
-                NetworkStream stream = gazeSocket.GetStream();
-                byte[] buffer = new byte[8192];
-
-                // Send initial page state
-                SendGazePageState();
-
-                while (isSocketActive)
-                {
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break;
-
-                    string rawData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    string[] messages = rawData.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (string msg in messages)
-                    {
-                        this.Invoke((MethodInvoker)delegate { HandleGazeMessage(msg); });
-                    }
-                }
-            }
-            catch (Exception)
-            {
-                gazeConnected = false;
-                Thread.Sleep(2000); // Retry after 2 seconds
-            }
-        }
+        if (ny < 0.25f || ny > 0.85f) { spStorySelectHover = -1; return; }
+        int idx = (int)(nx * 4);
+        if (idx < 0) idx = 0;
+        if (idx > 3) idx = 3;
+        spStorySelectHover = idx;
     }
 
     private void HandleGazeMessage(string msg)
@@ -817,12 +861,11 @@ public class TuioDemo : Form, TuioListener
                     lastGazeTime = DateTime.Now;
                     gazeTracking = true;
 
-                    // Store gaze point for current page's heatmap
                     string pageName = state.ToString();
-                    if (gazeHeatmapData.ContainsKey(pageName))
+                    if (Array.IndexOf(heatmapPageNames, pageName) >= 0)
                     {
-                        gazeHeatmapData[pageName].Add(new PointF(x, y));
-                        // Invalidate heatmap cache to regenerate
+                        string uk = CurrentGazeHeatmapUserKey();
+                        GetOrCreateHeatmapList(uk, pageName).Add(new PointF(x, y));
                         int pageIdx = Array.IndexOf(heatmapPageNames, pageName);
                         if (pageIdx >= 0) heatmapCache[pageIdx] = null;
                     }
@@ -862,6 +905,7 @@ public class TuioDemo : Form, TuioListener
                     adaptiveMenuQuadrant = parts[2];
                     adaptiveMenuConfidence = conf;
                     adaptiveMenuLastUpdate = DateTime.Now;
+                    Invalidate();
                 }
             }
         }
@@ -869,32 +913,43 @@ public class TuioDemo : Form, TuioListener
 
     private void SendGazePageState()
     {
-        if (gazeSocket != null && gazeSocket.Connected)
+        SendMessageToHub("PAGE:" + state.ToString());
+        SendMessageToHub("GET_MENU_POS:" + state.ToString());
+    }
+
+    private void SendMessageToHub(string msg)
+    {
+        if (hubStream != null)
         {
             try
             {
-                // Send page change + request adaptive menu position
-                string combined = "PAGE:" + state.ToString() + "\n" +
-                                  "GET_MENU_POS:" + state.ToString() + "\n";
-                byte[] data = Encoding.UTF8.GetBytes(combined);
-                gazeSocket.GetStream().Write(data, 0, data.Length);
+                if (!msg.EndsWith("\n")) msg += "\n";
+                byte[] data = Encoding.UTF8.GetBytes(msg);
+                hubStream.Write(data, 0, data.Length);
             }
-            catch { }
+            catch { hubStream = null; }
         }
     }
+
 
     // =========================================================
     //  Heatmap Generation and Rendering
     // =========================================================
     private Bitmap GenerateHeatmap(string pageName, int w, int h)
     {
-        if (!gazeHeatmapData.ContainsKey(pageName) || gazeHeatmapData[pageName].Count == 0)
-            return null;
+        List<PointF> points = GetHeatmapPoints(CurrentGazeHeatmapUserKey(), pageName);
+        if (points == null || points.Count == 0) return null;
+        return GenerateHeatmapFromPoints(points, w, h, opaqueBackground: false);
+    }
+
+    private Bitmap GenerateHeatmapFromPoints(List<PointF> points, int w, int h, bool opaqueBackground)
+    {
+        if (points == null || points.Count == 0) return null;
 
         Bitmap heatmap = new Bitmap(w, h);
         using (Graphics g = Graphics.FromImage(heatmap))
         {
-            g.Clear(Color.Transparent);
+            g.Clear(opaqueBackground ? Color.Black : Color.Transparent);
 
             // Create a grid-based density map
             int gridW = w / heatmapGridSize + 1;
@@ -902,7 +957,7 @@ public class TuioDemo : Form, TuioListener
             int[,] density = new int[gridH, gridW];
 
             // Count gaze points in each grid cell
-            foreach (PointF p in gazeHeatmapData[pageName])
+            foreach (PointF p in points)
             {
                 int gx = (int)(p.X * w) / heatmapGridSize;
                 int gy = (int)(p.Y * h) / heatmapGridSize;
@@ -998,9 +1053,10 @@ public class TuioDemo : Form, TuioListener
         }
 
         // Draw heatmap stats
-        if (gazeHeatmapData.ContainsKey(pageName))
+        List<PointF> pts = GetHeatmapPoints(CurrentGazeHeatmapUserKey(), pageName);
+        if (pts != null && pts.Count > 0)
         {
-            int count = gazeHeatmapData[pageName].Count;
+            int count = pts.Count;
             string statsText = $"Gaze Points: {count}";
             using (Font fnt = new Font("Segoe UI", 10f, FontStyle.Bold))
             using (Brush bg = new SolidBrush(Color.FromArgb(180, 0, 0, 0)))
@@ -1014,12 +1070,13 @@ public class TuioDemo : Form, TuioListener
 
     private void ClearHeatmapData()
     {
-        foreach (var key in gazeHeatmapData.Keys.ToList())
+        string uk = CurrentGazeHeatmapUserKey();
+        foreach (string pageName in heatmapPageNames)
         {
-            gazeHeatmapData[key].Clear();
+            List<PointF> list = GetHeatmapPoints(uk, pageName);
+            if (list != null) list.Clear();
         }
-        for (int i = 0; i < heatmapCache.Length; i++)
-            heatmapCache[i] = null;
+        InvalidateHeatmapCaches();
 
         // Tell server to clear data
         if (gazeSocket != null && gazeSocket.Connected)
@@ -1099,6 +1156,13 @@ public class TuioDemo : Form, TuioListener
         // Smooth animation: lerp current position toward target
         adaptiveMenuCurrentX += (adaptiveMenuTargetX - adaptiveMenuCurrentX) * MENU_LERP_SPEED;
         adaptiveMenuCurrentY += (adaptiveMenuTargetY - adaptiveMenuCurrentY) * MENU_LERP_SPEED;
+
+        // Keep animating if not yet at target
+        if (Math.Abs(adaptiveMenuTargetX - adaptiveMenuCurrentX) > 0.001f || 
+            Math.Abs(adaptiveMenuTargetY - adaptiveMenuCurrentY) > 0.001f)
+        {
+            Invalidate();
+        }
 
         float anchorX = adaptiveMenuCurrentX;
         float anchorY = adaptiveMenuCurrentY;
@@ -1430,7 +1494,7 @@ public class TuioDemo : Form, TuioListener
 
     private void RefreshWatchList()
     {
-        if (socketClient == null || db == null) return;
+        if (db == null) return;
 
         List<string> watchlist = new List<string>();
         var users = db.GetAllUsers();
@@ -1445,7 +1509,7 @@ public class TuioDemo : Form, TuioListener
 
         if (watchlist.Count > 0)
         {
-            socketClient.SendMessage("WATCH_BT:" + string.Join(",", watchlist));
+            SendMessageToHub("WATCH_BT:" + string.Join(",", watchlist));
         }
     }
 
@@ -1942,6 +2006,8 @@ public class TuioDemo : Form, TuioListener
             File.AppendAllText(attendanceLogFile, logEntry + Environment.NewLine);
         }
         catch { }
+
+        InvalidateHeatmapCaches();
 
         this.Invoke((MethodInvoker)delegate
         {
@@ -3794,6 +3860,12 @@ public class TuioDemo : Form, TuioListener
 
     private void Form_Closing(object sender, CancelEventArgs e)
     {
+        try
+        {
+            SaveGazeHeatmapSnapshotForPage(CurrentGazeHeatmapUserKey(), state.ToString());
+        }
+        catch { }
+
         isSocketActive = false;
         animTimer.Stop();
         client.removeTuioListener(this);
